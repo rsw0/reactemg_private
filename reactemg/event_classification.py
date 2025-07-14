@@ -37,115 +37,6 @@ def build_checkpoint_identifier(saved_checkpoint_pth: str) -> str:
     epoch_tag = os.path.splitext(os.path.basename(saved_checkpoint_pth))[0]
     return f"{run_folder}_{epoch_tag}"
 
-
-def epn_recognition_accuracy(gt_sequence, pred_sequence, overlap_threshold=0.5):
-    """
-    Returns:
-      None -> if GT is all zero (noGesture).
-      1    -> recognized (one contiguous block of the correct label with enough overlap).
-      0    -> otherwise.
-    """
-    gt_sequence = np.array(gt_sequence, dtype=int)
-    pred_sequence = np.array(pred_sequence, dtype=int)
-
-    # 1) If GT is entirely relax => skip
-    if np.all(gt_sequence == 0):
-        return None
-
-    # 2) Exactly 1 non-zero label in GT
-    non_zero_gt = np.unique(gt_sequence[gt_sequence != 0])
-    if len(non_zero_gt) != 1:
-        return 0
-    gt_label = non_zero_gt[0]
-
-    # 3) Exactly 1 non-zero label in predicted => must match
-    non_zero_pred = np.unique(pred_sequence[pred_sequence != 0])
-    if len(non_zero_pred) != 1:
-        return 0
-    pred_label = non_zero_pred[0]
-    if pred_label != gt_label:
-        return 0
-
-    # 4) Ensure that non-zero portion in 'pred_sequence' is a single contiguous block
-    indices_where_pred = np.where(pred_sequence == pred_label)[0]
-    first_idx = indices_where_pred[0]
-    last_idx = indices_where_pred[-1]
-
-    # Check everything in [first_idx..last_idx] is pred_label, everything outside is 0
-    if not np.all(pred_sequence[first_idx : last_idx + 1] == pred_label):
-        return 0
-    if not np.all(pred_sequence[:first_idx] == 0):
-        return 0
-    if not np.all(pred_sequence[last_idx + 1 :] == 0):
-        return 0
-
-    # 5) Dice overlap specifically for 'gt_label'
-    gt_active = gt_sequence == gt_label
-    pred_active = pred_sequence == pred_label
-    intersection = np.sum(gt_active & pred_active)
-    len_gt = np.sum(gt_active)
-    len_pred = np.sum(pred_active)
-    if (len_gt + len_pred) == 0:
-        return 0
-    dice_overlap = 2.0 * intersection / (len_gt + len_pred)
-    return 1 if dice_overlap >= overlap_threshold else 0
-
-
-def epn_classification_accuracy(gt_sequence, pred_sequence):
-    """
-    Computes file-level classification accuracy for EPN data:
-    1) If GT is all 0, correct if predictions are all 0; else 0.
-    2) If GT has exactly 1 non-zero label => correct if predictions are in {0, gt_label}.
-    """
-    gt_sequence = np.array(gt_sequence)
-    pred_sequence = np.array(pred_sequence)
-
-    # Case 1: all GT = 0
-    if np.all(gt_sequence == 0):
-        return 1 if np.all(pred_sequence == 0) else 0
-
-    # Case 2: exactly one non-zero label in G
-    non_zero_gt = np.unique(gt_sequence[gt_sequence != 0])
-    # There should only be 1 non-zero (non-relax) ground truthlabel
-    if len(non_zero_gt) != 1:
-        raise Exception(
-            "Manual Exception: More than one label in gt is non-zero (non-relax)"
-        )
-
-    # The single non-relax GT label
-    gt_label = non_zero_gt[0]
-
-    # Now check that all predicted classes are in {0, gt_label}
-    allowed = {0, gt_label}
-    unique_pred = set(np.unique(pred_sequence))
-    return 1 if unique_pred.issubset(allowed) else 0
-
-
-def epn_smoothed_classification_accuracy(gt_sequence, pred_sequence):
-    """
-    Computes a "smoothed" classification accuracy for EPN data at file-level:
-    - If GT is all 0 => correct if predictions are all 0.
-    - Otherwise => among predicted labels != 0, check the majority label. If it matches GT label, 1 else 0.
-    """
-    gt_sequence = np.array(gt_sequence)
-    pred_sequence = np.array(pred_sequence)
-
-    if np.all(gt_sequence == 0):
-        return 1 if np.all(pred_sequence == 0) else 0
-
-    non_zero_gt = np.unique(gt_sequence[gt_sequence != 0])
-    if len(non_zero_gt) != 1:
-        return 0
-
-    gt_label = non_zero_gt[0]
-    pred_non_zero = pred_sequence[pred_sequence != 0]
-    if len(pred_non_zero) == 0:
-        return 0
-    label_counts = Counter(pred_non_zero)
-    majority_label = max(label_counts, key=label_counts.get)
-    return 1 if majority_label == gt_label else 0
-
-
 def extract_buffer_windows(sequence, buffer_range):
     """
     Extracts buffer windows based on any class-to-class transition.
@@ -738,7 +629,7 @@ def plot_event_classification(
     """
     Loads EMG data from CSV or NPY, applies preprocessing, and plot EMG (top), GT (middle), and Pred (bottom)
     Saves to:
-      output/event_classification/<checkpoint_folder_name>/plots/event_<parent_folder_name>_<base_filename>.png
+      output/<checkpoint_folder_name>/plots/event_<parent_folder_name>_<base_filename>.png
     """
 
     # if not verbose, skip plotting
@@ -746,14 +637,16 @@ def plot_event_classification(
         return
 
     # Construct folder names
-    checkpoint_folder_name = build_checkpoint_identifier(saved_checkpoint_pth)
-    parent_folder_name = os.path.basename(os.path.dirname(path))
-    base_filename = os.path.splitext(os.path.basename(path))[0]
+    checkpoint_identifier = build_checkpoint_identifier(saved_checkpoint_pth)
+    folder_name = f"{checkpoint_identifier}_LA{lookahead}"
+    summary_dir = os.path.join("output", folder_name)
     base_dir = os.path.join(
-        "output", "event_classification", checkpoint_folder_name, "plots"
+        "output", summary_dir, "plots"
     )
     os.makedirs(base_dir, exist_ok=True)
-    save_filename = f"event_{parent_folder_name}_{base_filename}.png"
+
+    base_filename = os.path.splitext(os.path.basename(path))[0]
+    save_filename = f"{folder_name}_{base_filename}.png"
     save_path = os.path.join(base_dir, save_filename)
 
     # Load csv or npy
@@ -1335,10 +1228,10 @@ def process_and_evaluate(
     )
 
     print("\n** Current Accuracy **")
-    print(f"  Event Accuracy: {results['transition_window_accuracy']:.4f}")
+    print(f"  Transition Accuracy: {results['transition_window_accuracy']:.4f}")
     print(f"  Raw Accuracy:   {results['overall_accuracy']:.4f}")
     print(f"  Reasons:        {results['transition_reasons']}")
-    print(f"  Event Count:    {results['event_counts']}")
+    print(f"  Transition (Event) Count:    {results['event_counts']}")
     print("--------------------------------------------------------\n")
 
     return results, pred_aggregated, gt_aggregated
@@ -1480,19 +1373,9 @@ def main(
     total_correct_events = 0.0
     sum_raw_accuracies = 0.0
 
-    # EPN accumulations
-    sum_epn_class = 0.0
-    sum_epn_smooth = 0.0
-    sum_epn_recog = 0.0
-    epn_file_count = 0
-    epn_recog_count = 0
-
     # storing std
     event_accuracies_per_file = []
     raw_accuracies_per_file = []
-    epn_class_accuracies_per_file = []
-    epn_smooth_accuracies_per_file = []
-    epn_recog_accuracies_per_file = []
 
     # Will store per-file results
     results_across_files = []
@@ -1594,7 +1477,7 @@ def main(
         # Print partial (cumulative) results
         print(f"\n** Cumulative Results After File {i + 1}/{len(csv_paths_all)} **")
         print(
-            f"  Event Accuracy so far: {partial_event_accuracy:.4f} ± {partial_event_std:.4f}"
+            f"  Transition Accuracy so far: {partial_event_accuracy:.4f} ± {partial_event_std:.4f}"
         )
         print(
             f"  Raw Accuracy so far:   {partial_raw_accuracy:.4f} ± {partial_raw_std:.4f}"
@@ -1624,7 +1507,7 @@ def main(
     epn_eval_conditioning = "epn_eval" if epn_eval == 1 else "roam_eval"
 
     folder_name = f"{checkpoint_identifier}_LA{lookahead}"
-    summary_dir = os.path.join("output", "event_classification", folder_name)
+    summary_dir = os.path.join("output", folder_name)
     os.makedirs(summary_dir, exist_ok=True)
 
     # Build a little range string, e.g. "_range_0-5" if sample_range=(0,5)
@@ -1644,14 +1527,14 @@ def main(
     with open(summary_path, "w") as f:
         f.write("=== Overall Summary ===\n")
         f.write(
-            f"Event Accuracy (weighted) (avg ± std): "
+            f"Transition Accuracy (weighted) (avg ± std): "
             f"{avg_event_accuracy:.4f} ± {std_event_accuracy:.4f}\n"
         )
         f.write(
             f"Raw Accuracy (average) (avg ± std): "
             f"{avg_raw_accuracy:.4f} ± {std_raw_accuracy:.4f}\n"
         )
-        f.write(f"Total Events: {total_events}\n\n")
+        f.write(f"Total Transition (Event): {total_events}\n\n")
 
         f.write("=== Distribution of Transition Reasons ===\n")
         for reason, count in reason_counter.items():
