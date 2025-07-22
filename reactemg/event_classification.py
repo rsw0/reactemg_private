@@ -24,6 +24,7 @@ from nn_models import (
     ANN_Model,
 )
 from minlora import add_lora, merge_lora, LoRAParametrization
+from torch.nn.utils import parametrize
 
 
 ###############################################################################
@@ -641,7 +642,7 @@ def plot_event_classification(
     checkpoint_identifier = build_checkpoint_identifier(saved_checkpoint_pth)
     folder_name = f"{checkpoint_identifier}_LA{lookahead}"
     summary_dir = os.path.join("output", folder_name)
-    base_dir = os.path.join("output", summary_dir, "plots")
+    base_dir = os.path.join(summary_dir, "plots")
     os.makedirs(base_dir, exist_ok=True)
 
     base_filename = os.path.splitext(os.path.basename(path))[0]
@@ -867,12 +868,23 @@ def initialize_model(args_dict, checkpoint, model_choice, device):
     model.load_state_dict(checkpoint["model_info"]["model_state_dict"], strict=False)
     if "use_lora" in args_dict and args_dict["use_lora"] == 1:
         model.load_state_dict(checkpoint["lora_state_dict"], strict=False)
-        merge_lora(model)
+        # merge_lora(model)
+        safe_merge_lora(model)
 
     model.to(device)
     model.eval()
 
     return model
+
+
+def _safe_merge(layer):
+    if hasattr(layer, "parametrizations"):
+        for k in list(layer.parametrizations.keys()):
+            parametrize.remove_parametrizations(layer, k, leave_parametrized=True)
+
+
+def safe_merge_lora(model):
+    model.apply(_safe_merge)
 
 
 def process_and_evaluate(
@@ -1341,7 +1353,10 @@ def main(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    if args_dict.get("dataset_selection") == "finetune":
+    if (
+        args_dict.get("dataset_selection") == "finetune"
+        or args_dict.get("dataset_selection") == "mixed"
+    ):
         val_paths = args_dict["labeled_csv_paths_val"]
         if isinstance(val_paths, tuple):
             val_paths = val_paths[0]

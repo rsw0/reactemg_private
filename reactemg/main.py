@@ -55,6 +55,21 @@ def main(args):
     # Data split condition
     if args.dataset_selection == "finetune":
         labeled_csv_paths_train, labeled_csv_paths_val = get_finetune_csv_paths(args.val_patient_ids)
+    elif args.dataset_selection == "mixed":
+        labeled_csv_paths_train, labeled_csv_paths_val = get_csv_paths(
+            dataset_selection='roam_only',
+            num_classes=args.num_classes,
+            roam_data_master_folder=roam_data_master_folder,
+            roam_data_subfolders=roam_data_subfolders,
+            public_data_folders=public_data_folders,
+            epn_data_master_folder=epn_data_master_folder,
+            val_patient_ids=args.val_patient_ids,
+            epn_subset_percentage=args.epn_subset_percentage,
+            discard_labeled_percentage=args.discard_labeled_percentage,
+        )
+        val_patient_csv_paths_train, val_patient_csv_paths_val = get_finetune_csv_paths(args.val_patient_ids)
+        labeled_csv_paths_train.extend(val_patient_csv_paths_train)
+        labeled_csv_paths_val = val_patient_csv_paths_val
     else:
         labeled_csv_paths_train, labeled_csv_paths_val = get_csv_paths(
             dataset_selection=args.dataset_selection,
@@ -303,7 +318,8 @@ if __name__ == "__main__":
             "pub_with_roam",
             "pub_with_roam_with_epn",
             "pub_with_epn",
-            "finetune"
+            "finetune",
+            "mixed"
         ],
         help="Select the dataset used to train the current model",
     )
