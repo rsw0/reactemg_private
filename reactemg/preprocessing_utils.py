@@ -3,6 +3,7 @@ import random
 import os
 import glob
 import math
+from typing import List, Tuple
 from nn_models import (
     Any2Any_Model,
     EDTCN_Model,
@@ -368,6 +369,72 @@ def get_unlabeled_csv_paths(
         f"[get_unlabeled_csv_paths] Sub-sampled {len(final_unlabeled_paths)} unlabeled files out of {len(cleaned_unlabeled)} possible."
     )
     return final_unlabeled_paths
+
+
+def get_finetune_csv_paths(
+    val_patient_ids: List[str],
+    roam_root: str = "../data/ROAM_EMG",
+    patient_root: str = "../data/patient_data",
+) -> Tuple[List[str], List[str]]:
+    """
+    Build train/val file lists for the special 'finetune' setting.
+    Parameters
+    ----------
+    val_patient_ids : List[str]
+        Expect **exactly one** subject ID, e.g. ["s4"] or ["p1"].
+    roam_root : str
+        Root folder that contains ROAM_EMG subject directories (default: ../data/ROAM_EMG).
+    patient_root : str
+        Root folder that contains patient_data sub-directories (default: ../data/patient_data).
+    Returns
+    -------
+    (train_paths, val_paths) : Tuple[List[str], List[str]]
+        Sorted lists of absolute CSV paths for training and validation.
+    """
+    if len(val_patient_ids) != 1:
+        raise ValueError(
+            "get_finetune_csv_paths expects a single subject ID "
+            "(e.g. ['s4'] or ['p1']), got: {}".format(val_patient_ids)
+        )
+    val_id = val_patient_ids[0].lower()
+    train_files, val_files = [], []
+    # ----------------------------------------------------------
+    # ROAM subject (folder name exactly 'sX', where X is integer)
+    # ----------------------------------------------------------
+    if val_id.startswith("s"):
+        subj_dir = os.path.join(roam_root, val_id)
+        if not os.path.isdir(subj_dir):
+            raise FileNotFoundError(f"No folder found: {subj_dir}")
+        for fp in glob.glob(os.path.join(subj_dir, "*.csv")):
+            name = os.path.basename(fp).lower()
+            if any(k in name for k in ("static_resting", "static_reaching")):
+                train_files.append(fp)
+            elif any(k in name for k in ("static_hanging", "static_unsupported")):
+                val_files.append(fp)
+    # ----------------------------------------------------------
+    # Patient (folder that *ends with* val_id, e.g. *p1 or *p16)
+    # ----------------------------------------------------------
+    elif val_id.startswith("p"):
+        # strict “endswith” match so p1 ≠ p16
+        matches = [
+            d
+            for d in os.listdir(patient_root)
+            if os.path.isdir(os.path.join(patient_root, d)) and d.endswith(val_id)
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Expected exactly one folder in {patient_root} ending in '{val_id}', "
+                f"found: {matches}"
+            )
+        subj_dir = os.path.join(patient_root, matches[0])
+        for fp in glob.glob(os.path.join(subj_dir, "*.csv")):
+            if fp.endswith("_1.csv"):
+                train_files.append(fp)
+            elif fp.endswith("_2.csv"):
+                val_files.append(fp)
+    else:
+        raise ValueError(f"val_patient_id must start with 's' or 'p', got '{val_id}'")
+    return sorted(set(train_files)), sorted(set(val_files))
 
 
 def initialize_dataset(

@@ -37,6 +37,7 @@ def build_checkpoint_identifier(saved_checkpoint_pth: str) -> str:
     epoch_tag = os.path.splitext(os.path.basename(saved_checkpoint_pth))[0]
     return f"{run_folder}_{epoch_tag}"
 
+
 def extract_buffer_windows(sequence, buffer_range):
     """
     Extracts buffer windows based on any class-to-class transition.
@@ -640,9 +641,7 @@ def plot_event_classification(
     checkpoint_identifier = build_checkpoint_identifier(saved_checkpoint_pth)
     folder_name = f"{checkpoint_identifier}_LA{lookahead}"
     summary_dir = os.path.join("output", folder_name)
-    base_dir = os.path.join(
-        "output", summary_dir, "plots"
-    )
+    base_dir = os.path.join("output", summary_dir, "plots")
     os.makedirs(base_dir, exist_ok=True)
 
     base_filename = os.path.splitext(os.path.basename(path))[0]
@@ -1342,12 +1341,23 @@ def main(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # Depending on epn_eval, gather files:
-    if epn_eval == 1:
-        epn_data_master_folder = files_or_dirs[0]
-        csv_paths_all = gather_epn_paths(epn_data_master_folder)
+    if args_dict.get("dataset_selection") == "finetune":
+        val_paths = args_dict["labeled_csv_paths_val"]
+        if isinstance(val_paths, tuple):
+            val_paths = val_paths[0]
+        csv_paths_all = list(val_paths)
+
+        print(
+            f"Checkpoint originated from a finetune run; "
+            f"evaluating on its {len(csv_paths_all)} validation files."
+        )
+        epn_eval = 0
     else:
-        csv_paths_all = gather_csv_paths(files_or_dirs, args_dict)
+        if epn_eval == 1:
+            epn_data_master_folder = files_or_dirs[0]
+            csv_paths_all = gather_epn_paths(epn_data_master_folder)
+        else:
+            csv_paths_all = gather_csv_paths(files_or_dirs, args_dict)
 
     if not csv_paths_all:
         raise ValueError("No valid files found for evaluation.")
