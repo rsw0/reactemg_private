@@ -1,0 +1,47 @@
+Run each command in a separate terminal window
+Before running the command, activate the ROS environment by activating the Conda environment. 
+The simplest way is to cd (takes you to home), then source myhand.sh every time you open a new terminal
+
+0.
+Connect cables
+- motor 6-pin (watch for direction)
+- thumb linear actuator (watch for direction)
+- usb-b to computer
+- myo Bluetooth receiver
+- check power supply, 12V for motor
+
+1. 
+roscore
+
+2.
+Identify port assignment of Arduino
+ls -l /dev/serial/by-id/
+
+3. 
+roslaunch motion_capture biofeedback_motor.launch
+
+4. 
+connect power (wall or 12V PS)
+
+5.
+rosrun myhand_driver control_hand.py
+
+6.
+test button control
+
+7. 
+rosrun myo raw_emg.py --mode 200_raw --myo myo#
+Note: replace # with the ID of the myo
+
+8.
+roslaunch myo emg_plot.launch
+
+10.
+python3 live_inference.py --saved_checkpoint_pth model_checkpoints/finetune_low_lr_hl_2025-04-14_05-02-51_pc1/epoch_10.pth --lookahead 20 --samples_between_prediction 20
+
+To collect data:
+rosrun emg_predictors collect_data.py
+
+To kill all terminals
+pkill -f 'gnome-terminal|xterm|konsole'
+
