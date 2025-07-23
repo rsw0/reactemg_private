@@ -1,47 +1,46 @@
 #!/usr/bin/env python3
-from pathlib import Path
-import numpy as np
-import event_classification as ec
 
-# ------------------------------------------------------------------
-# Copy-paste your list of run-folders
+# ================================================================
+# Evaluation *looper* script
+# - Runs each subject‑specific checkpoint
+# - Prints overall means
+# - Saves subject‑wise results to csv file
 # Shortcut for generating a copy-paste-friendly folder list:
 # find . -maxdepth 1 -type d -name '*LOSO*' -printf '"%P",\n'
-# ------------------------------------------------------------------
+# ================================================================
+
+# argparse flag --csv_name
+# name of the per-subject csv file
+
+from pathlib import Path
+import numpy as np
+import torch
+import pandas as pd
+import event_classification as ec
+import argparse
+
+parser = argparse.ArgumentParser(
+    description="Loop over checkpoints, evaluate, and export a subject-wise CSV."
+)
+parser.add_argument(
+    "--csv_name",
+    type=str,
+    default="subject_wise_accuracy.csv",
+    help="Filename for the per-subject CSV (it will be placed in ./output/)",
+)
+args = parser.parse_args()
+output_dir = Path("output")
+output_dir.mkdir(exist_ok=True)
+csv_path = output_dir / args.csv_name
+
 model_folders = [
-"Finetuned_s1_2025-07-21_18-33-34_pc1",
-"Finetuned_s2_2025-07-21_18-34-22_pc1",
-"Finetuned_s3_2025-07-21_18-35-12_pc1",
-"Finetuned_s4_2025-07-21_18-35-58_pc1",
-"Finetuned_s5_2025-07-21_18-36-48_pc1",
-"Finetuned_s6_2025-07-21_18-37-36_pc1",
-"Finetuned_s7_2025-07-21_18-38-22_pc1",
-"Finetuned_s8_2025-07-21_18-39-08_pc1",
-"Finetuned_s9_2025-07-21_18-39-51_pc1",
-"Finetuned_s10_2025-07-21_18-40-22_pc1",
-"Finetuned_s11_2025-07-21_18-40-55_pc1",
-"Finetuned_s12_2025-07-21_18-41-26_pc1",
-"Finetuned_s13_2025-07-21_18-41-55_pc1",
-"Finetuned_s14_2025-07-21_18-42-27_pc1",
-"Finetuned_s15_2025-07-21_18-43-00_pc1",
-"Finetuned_s16_2025-07-21_18-43-27_pc1",
-"Finetuned_s17_2025-07-21_18-43-59_pc1",
-"Finetuned_s18_2025-07-21_18-44-28_pc1",
-"Finetuned_s19_2025-07-21_18-44-59_pc1",
-"Finetuned_s20_2025-07-21_18-45-29_pc1",
-"Finetuned_s21_2025-07-21_18-46-02_pc1",
-"Finetuned_s22_2025-07-21_18-46-31_pc1",
-"Finetuned_s23_2025-07-21_18-47-00_pc1",
-"Finetuned_s24_2025-07-21_18-47-32_pc1",
-"Finetuned_s25_2025-07-21_18-48-01_pc1",
-"Finetuned_s26_2025-07-21_18-48-28_pc1",
-"Finetuned_s27_2025-07-21_18-48-57_pc1",
-"Finetuned_s28_2025-07-21_18-49-26_pc1",
+
+# TODO
+# Comma-delimited str folder names
 
 ]
 
-# No lookahead
-
+# No Lookahead
 COMMON_KWARGS = dict(
     eval_batch_size=64,
     eval_task="predict_action",
@@ -63,8 +62,8 @@ COMMON_KWARGS = dict(
     model_choice="any2any",
     sample_range=None,
 )
-"""
 
+"""
 # With lookahead
 COMMON_KWARGS = dict(
     eval_batch_size=64,
@@ -88,23 +87,62 @@ COMMON_KWARGS = dict(
     sample_range=None,
 )
 """
+
+# ---------------------------------------
+#                ACCUMULATORS
+# ---------------------------------------
 event_accs = []
 raw_accs = []
+subject_ids = []
 
+# ------------------------------------------
+#                MAIN LOOP
+# ------------------------------------------
 for folder in model_folders:
-    ckpt = Path("model_checkpoints") / folder / "epoch_4.pth"
-    print(f"→ evaluating {ckpt}")
+    ckpt = Path("model_checkpoints") / folder / "epoch_9.pth"
+
+    # --- Determine the subject ID from the checkpoint’s args_dict ---
+    ckpt_dict = torch.load(ckpt, map_location="cpu")
+    args_dict = ckpt_dict["args_dict"]
+
+    if "val_patient_ids" in args_dict:
+        subj_id = args_dict["val_patient_ids"][0]
+    else:
+        raise Exception(
+            "val_patient_ids not in saved args_dict. Verify checkpoint integrity"
+        )
+
+    print(f"→ evaluating {ckpt}  (subject {subj_id})")
 
     evt_acc, raw_acc = ec.main(
         saved_checkpoint_pth=str(ckpt),
         **COMMON_KWARGS,
     )
 
+    # save results
+    subject_ids.append(subj_id)
     event_accs.append(evt_acc)
     raw_accs.append(raw_acc)
 
+# --------------------------------------------------
+#              FINAL SUMMARY  (stdout)
+# --------------------------------------------------
 print("\n=========== FINAL SUMMARY ===========")
-print(f"Models evaluated   : {len(model_folders)}")
-print(f"Average Transition Accuracy: {np.mean(event_accs):.4f}")
-print(f"Average Raw Accuracy  : {np.mean(raw_accs):.4f}")
+print(f"Models evaluated            : {len(model_folders)}")
+print(f"Average Transition Accuracy : {np.mean(event_accs):.4f}")
+print(f"Average Raw Accuracy        : {np.mean(raw_accs):.4f}")
 print("=====================================")
+
+# -----------------------------------------------
+#              WRITE PER‑SUBJECT CSV
+# -----------------------------------------------
+df = pd.DataFrame(
+    {
+        "subject_id": subject_ids,
+        "avg_raw_accuracy": raw_accs,
+        "avg_transition_accuracy": event_accs,
+    }
+)
+
+df.to_csv(csv_path, index=False)
+print(f"Per-subject results written to '{csv_path}'.")

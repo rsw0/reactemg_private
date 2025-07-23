@@ -134,20 +134,6 @@ def main(args):
     # Model init
     model = initialize_model(args)
 
-    # Initialize LoRA
-    if args.use_lora == 1:
-        lora_config = {
-            nn.Linear: {
-                "weight": partial(
-                    LoRAParametrization.from_linear,
-                    rank=args.lora_rank,
-                    lora_alpha=args.lora_alpha,
-                    lora_dropout_p=args.lora_dropout_p,
-                ),
-            },
-        }
-        add_lora(model, lora_config)
-
     # Loading local checkpoint if provided
     if args.saved_checkpoint_pth is not None:
         print(
@@ -162,6 +148,21 @@ def main(args):
         )
     else:
         print("saved_checkpoint_pth is None. Initializing weights from scratch...")
+
+    # Initialize LoRA
+    if args.use_lora == 1:
+        lora_config = {
+            nn.Linear: {
+                "weight": partial(
+                    LoRAParametrization.from_linear,
+                    rank=args.lora_rank,
+                    lora_alpha=args.lora_alpha,
+                    lora_dropout_p=args.lora_dropout_p,
+                ),
+            },
+        }
+        add_lora(model, lora_config)
+    
     model.to(device)
     print(
         "Total trainable parameters:",
@@ -418,9 +419,9 @@ if __name__ == "__main__":
         help="Whether or not to use lora",
     )
     parser.add_argument("--lora_rank", default=16, type=int, help="lora rank r")
-    parser.add_argument("--lora_alpha", default=8, type=int, help="lora alpha")
+    parser.add_argument("--lora_alpha", default=32, type=int, help="lora alpha")
     parser.add_argument(
-        "--lora_dropout_p", default=0.05, type=float, help="dropout rate on lora"
+        "--lora_dropout_p", default=0.0, type=float, help="dropout rate on lora"
     )
     parser.add_argument(
         "--output_reduction_method",
