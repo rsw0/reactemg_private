@@ -37,11 +37,11 @@ Note: replace # with the ID of the myo
 roslaunch myo emg_plot.launch
 
 10.
-python3 live_inference.py --saved_checkpoint_pth model_checkpoints/finetune_low_lr_hl_2025-04-14_05-02-51_pc1/epoch_10.pth --lookahead 20 --samples_between_prediction 20
+python3 live_inference.py --saved_checkpoint_pth model_checkpoints/<checkpoint_folder_name>/epoch_<epoch_num>.pth --lookahead 20 --samples_between_prediction 20
 
 To collect data:
 rosrun emg_predictors collect_data.py
 
-To kill all terminals
+To kill all terminals:
 pkill -f 'gnome-terminal|xterm|konsole'
 

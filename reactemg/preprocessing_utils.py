@@ -3,7 +3,7 @@ import random
 import os
 import glob
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Sequence
 from nn_models import (
     Any2Any_Model,
     EDTCN_Model,
@@ -282,91 +282,95 @@ def get_csv_paths(
 
 
 def get_unlabeled_csv_paths(
-    unlabeled_data_folder,
-    labeled_paths_train,
-    labeled_paths_val,
-    epn_unlabeled_classes,
-    unlabeled_percentage,
-):
+    unlabeled_data_folder: str,
+    labeled_paths_train: Sequence[str],
+    labeled_paths_val: Sequence[str],
+    unlabeled_percentage: float,
+) -> List[str]:
     """
-    Gathers and returns unlabeled file paths, applying:
-      1) EPN-based skip logic if epn_unlabeled_classes=3 (skips wave/pinch).
-      2) Random sampling of unlabeled data by unlabeled_percentage (file-level).
-      3) Removal of any files also appearing in labeled_paths_train or labeled_paths_val.
-    Reproducibility guaranteed by sorting + seeding the shuffle.
+    Recursively gather all .csv and .npy files under `unlabeled_data_folder`
+    (e.g., '../data/unlabeled_data'), apply EMG-EPN-612/testingJSON filtering,
+    remove collisions with labeled data, and optionally sub-sample by
+    `unlabeled_percentage`.
 
-    Parameters
-    ----------
-    unlabeled_data_folder : str
-        Root folder holding unlabeled .csv or .npy files (EPN or other public).
-    labeled_paths_train : list of str
-        Already-final labeled training file paths (after discarding).
-    labeled_paths_val : list of str
-        Labeled validation file paths.
-    epn_unlabeled_classes : int
-        3 or 6. If 3 => skip wave/pinch from EPN folder. If 6 => keep them.
-        (Does NOT depend on the model's num_classes!)
-    unlabeled_percentage : float
-        Fraction of unlabeled data to retain (0.0 => none, 1.0 => all).
+    Rules
+    -----
+    1) Recursively include all .csv/.npy under `unlabeled_data_folder`.
+    2) If the *top-level* child folder is 'EMG-EPN-612', ignore any files
+       within subtrees whose directory name contains 'testingJSON'
+       (case-insensitive), e.g.:
+          ../data/unlabeled_data/EMG-EPN-612/testingJSON_user221/**  -> ignore
+          ../data/unlabeled_data/EMG-EPN-612/trainingJSON_user166/** -> include
+    3) Remove any unlabeled files whose basenames collide with labeled
+       train/val basenames.
+    4) Keep the fraction specified by `unlabeled_percentage`:
+         - <= 0.0 -> keep none
+         - >= 1.0 -> keep all
+         - (0,1)  -> deterministic random sample of that fraction
 
     Returns
     -------
-    final_unlabeled_paths : list of str
-        The final subset of unlabeled file paths.
+    List[str] : Final list of selected unlabeled file paths (sorted).
     """
+    # Defensive defaults in case None is passed
+    labeled_paths_train = labeled_paths_train or []
+    labeled_paths_val = labeled_paths_val or []
 
-    # 1) Gather all .csv/.npy from unlabeled_data_folder
-    all_unlabeled_paths = []
+    def is_under_epn612(curr_root: str) -> bool:
+        """Return True if `curr_root` is inside the top-level 'EMG-EPN-612' subtree."""
+        rel = os.path.relpath(curr_root, unlabeled_data_folder)
+        if rel == ".":
+            return False
+        top_level = rel.split(os.sep, 1)[0]
+        return top_level == "EMG-EPN-612"
+
+    all_unlabeled_paths: List[str] = []
+
+    # Walk the tree; prune 'testingJSON*' subtrees only when under EMG-EPN-612
     for root, dirs, files in os.walk(unlabeled_data_folder):
-        # Sort to ensure consistent ordering across machines
-        files_sorted = sorted(files)
-        for fname in files_sorted:
-            lower_name = fname.lower()
-            if lower_name.endswith(".csv") or lower_name.endswith(".npy"):
+        if is_under_epn612(root):
+            # If the *current* directory is a testingJSON* folder, prune the entire subtree.
+            if "testingjson" in os.path.basename(root).lower():
+                dirs[:] = []  # don't descend further
+                continue
+            # Also prevent descending into any immediate testingJSON* subdirectories.
+            dirs[:] = [d for d in dirs if "testingjson" not in d.lower()]
+
+        # Collect files from this directory
+        for fname in sorted(files):
+            lower = fname.lower()
+            if lower.endswith(".csv") or lower.endswith(".npy"):
                 full_path = os.path.join(root, fname)
-
-                # 2) If EPN folder => apply skip logic for 3-class
-                # (only skip wave/pinch if epn_unlabeled_classes == 3)
-                if "epn" in root.lower():
-                    if epn_unlabeled_classes == 3:
-                        skip_substrings = ["wavein", "waveout", "pinch"]
-                        if any(sub in lower_name for sub in skip_substrings):
-                            continue
-
-                # For non-EPN folders => no gesture skipping
-                # (public unlabeled data is always kept)
                 all_unlabeled_paths.append(full_path)
 
-    # 3) Remove collisions with labeled train/val
-    labeled_basenames = set(
-        [os.path.basename(p) for p in labeled_paths_train + labeled_paths_val]
-    )
+    # Collision removal using basenames
+    labeled_basenames = {
+        os.path.basename(p) for p in list(labeled_paths_train) + list(labeled_paths_val)
+    }
+    cleaned_unlabeled = [
+        p for p in all_unlabeled_paths if os.path.basename(p) not in labeled_basenames
+    ]
 
-    cleaned_unlabeled = []
-    for path_ in all_unlabeled_paths:
-        if os.path.basename(path_) not in labeled_basenames:
-            cleaned_unlabeled.append(path_)
-    print(
-        f"[get_unlabeled_csv_paths] Found {len(all_unlabeled_paths)} raw unlabeled files."
-    )
-    print(
-        f"[get_unlabeled_csv_paths] After removing collisions: {len(cleaned_unlabeled)}"
-    )
+    print(f"[get_unlabeled_csv_paths] Found {len(all_unlabeled_paths)} raw unlabeled files.")
+    print(f"[get_unlabeled_csv_paths] After removing collisions: {len(cleaned_unlabeled)}")
 
-    # 4) Randomly sub-sample by unlabeled_percentage
+    # Sub-sample by unlabeled_percentage (deterministic)
     cleaned_unlabeled = sorted(cleaned_unlabeled)
     if unlabeled_percentage <= 0.0:
-        final_unlabeled_paths = []
+        final_unlabeled_paths: List[str] = []
     elif unlabeled_percentage >= 1.0:
         final_unlabeled_paths = cleaned_unlabeled
     else:
         num_to_keep = int(len(cleaned_unlabeled) * unlabeled_percentage)
-        random.shuffle(cleaned_unlabeled)
-        final_unlabeled_paths = cleaned_unlabeled[:num_to_keep]
-        final_unlabeled_paths = sorted(final_unlabeled_paths)
+        if num_to_keep > 0:
+            rng = random.Random(0)  # deterministic selection across runs/machines
+            final_unlabeled_paths = sorted(rng.sample(cleaned_unlabeled, num_to_keep))
+        else:
+            final_unlabeled_paths = []
 
     print(
-        f"[get_unlabeled_csv_paths] Sub-sampled {len(final_unlabeled_paths)} unlabeled files out of {len(cleaned_unlabeled)} possible."
+        f"[get_unlabeled_csv_paths] Sub-sampled {len(final_unlabeled_paths)} unlabeled files "
+        f"out of {len(cleaned_unlabeled)} possible."
     )
     return final_unlabeled_paths
 

@@ -51,6 +51,8 @@ for idx in "${!patient_ids[@]}"; do
       --offset 30
       --num_classes 3
       --task_selection 0 1 2
+      --use_input_layernorm
+      --share_pe
       --dataset_selection finetune  # IMPORTANT! Set to enable finetuning
       --window_size 600
       --val_patient_ids "${patient_id}"
