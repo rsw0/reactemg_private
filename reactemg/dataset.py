@@ -1089,12 +1089,7 @@ class Any2Any_Dataset(Dataset):
                     self.end_mask_percentage_sampling_range[task_idx]
                 )
 
-            if task_idx == 3:
-                mask_percentage = random.uniform(
-                    mask_lower_bound - 0.1, mask_upper_bound - 0.1
-                )
-            else:
-                mask_percentage = random.uniform(mask_lower_bound, mask_upper_bound)
+            mask_percentage = random.uniform(mask_lower_bound, mask_upper_bound)
 
             selected_curriculum_stage = [0]
             if self.curriculum_stage == 1 and task_idx in [1, 3]:

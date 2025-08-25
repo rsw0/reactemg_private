@@ -102,7 +102,6 @@ def main(args):
             unlabeled_data_folder="../data/unlabeled_data",
             labeled_paths_train=labeled_csv_paths_train,
             labeled_paths_val=labeled_csv_paths_val,
-            epn_unlabeled_classes=args.epn_unlabeled_classes,
             unlabeled_percentage=args.unlabeled_percentage,
         )
         unlabeled_csv_paths_train = sorted(list(set(unlabeled_csv_paths_train)))
@@ -348,13 +347,6 @@ if __name__ == "__main__":
         type=float,
         default=0.0,
         help="Fraction of labeled training data to discard at the file level (0.0 to 1.0).",
-    )
-    parser.add_argument(
-        "--epn_unlabeled_classes",
-        type=int,
-        choices=[3, 6],
-        default=3,
-        help="Specifies how many gestures to keep for EPN unlabeled. 3 => skip wave/pinch, 6 => keep them.",
     )
     parser.add_argument(
         "--unlabeled_percentage",
