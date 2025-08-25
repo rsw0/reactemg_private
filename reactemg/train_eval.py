@@ -1,4 +1,5 @@
 import torch
+import math
 import wandb
 import datetime
 import os
@@ -102,9 +103,7 @@ class LabeledUnlabeledSampler(Sampler):
         return iter(all_batches)
 
     def __len__(self):
-        return (
-            len(self.labeled_indices) + len(self.unlabeled_indices)
-        ) // self.batch_size
+        return math.ceil(len(self.labeled_indices)/self.batch_size) + math.ceil(len(self.unlabeled_indices)/self.batch_size)
 
 
 def compute_parameter_changes(model, initial_lora_params, initial_non_lora_params):
