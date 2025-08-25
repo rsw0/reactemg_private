@@ -351,7 +351,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--unlabeled_percentage",
         type=float,
-        default=0.0,
+        default=1.0,
         help="Fraction of unlabeled data to use (0.0 means no unlabeled data being used).",
     )
 
