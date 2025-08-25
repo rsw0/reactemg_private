@@ -498,11 +498,22 @@ class Any2Any_Model(nn.Module):
             # “action positions” here are the last window_size tokens
             for b in range(batch_size):
                 if task_idx[b] == 3:
-                    # block [all queries from action, all keys from action]
-                    attention_mask[b, :, -self.window_size :] = True
-                    attention_mask[b, -self.window_size :, :] = True
+                    # seq = [EMG(0:self.window_size) | ACTION(self.window_size:2*self.window_size)]
+                    # block EMG from attending to Action
+                    attention_mask[b, :self.window_size, self.window_size:2*self.window_size] = True
+                    # block Action from attending to EMG
+                    attention_mask[b, self.window_size:2*self.window_size, self.window_size] = True 
+                    # Create an diagonal attention mask (which only allows for self-attention) for the action segment of the sequence
+                    # (the lower right corner on the attention map for the attention FROM action To action)
+                    temp_block = torch.ones(self.window_size, self.window_size, dtype=torch.bool, device=src.device)
+                    # Setting the diagonal to False. False in torch's syntax is unmasked
+                    temp_block.fill_diagonal_(False)
+                    # Assign to the correct portion
+                    attention_mask[b, self.window_size:2*self.window_size, self.window_size:2*self.window_size] = temp_block
 
             # Expand mask for multihead
+            # Pytorch expect the attention mask to be of shape (batch_size*nhead, S, S)
+            # Before the repeat_interleave call, the attention mask is of shape (batch_size, S, S)
             attention_mask = attention_mask.repeat_interleave(self.nhead, dim=0)
 
             # Transformer
