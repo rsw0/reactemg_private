@@ -598,9 +598,18 @@ class Any2Any_Model(nn.Module):
             )
             for b in range(batch_size):
                 if task_idx[b] == 3:
-                    # block last coarse_length entries if they correspond to action
-                    attention_mask[b, :, -self.coarse_length :] = True
-                    attention_mask[b, -self.coarse_length :, :] = True
+                    # seq = [EMG(0:self.window_size) | ACTION(self.window_size:2*self.window_size)]
+                    # block EMG from attending to Action
+                    attention_mask[b, :self.window_size, self.window_size:2*self.window_size] = True
+                    # block Action from attending to EMG
+                    attention_mask[b, self.window_size:2*self.window_size, self.window_size] = True 
+                    # Create an diagonal attention mask (which only allows for self-attention) for the action segment of the sequence
+                    # (the lower right corner on the attention map for the attention FROM action To action)
+                    temp_block = torch.ones(self.window_size, self.window_size, dtype=torch.bool, device=src.device)
+                    # Setting the diagonal to False. False in torch's syntax is unmasked
+                    temp_block.fill_diagonal_(False)
+                    # Assign to the correct portion
+                    attention_mask[b, self.window_size:2*self.window_size, self.window_size:2*self.window_size] = temp_block
             attention_mask = attention_mask.repeat_interleave(self.nhead, dim=0)
 
             # Transformer
