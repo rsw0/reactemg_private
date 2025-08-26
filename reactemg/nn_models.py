@@ -479,6 +479,24 @@ class Any2Any_Model(nn.Module):
                 + self.emg_positional_encoding
             )
 
+            # EMG-only Forward, to be used with --split_unlabeled_batch
+            # The sequence will be shorter, only containing EMG. This will have to be an unlabeled-only batch
+            # The condition torch.all(task_idx == 3) will only be triggered when --split_unlabeled_batch is set
+            # Otherwise it won't trigger this block and the code continuous to joint action-emg forward loop
+            if torch.all(task_idx == 3):
+                src = masked_emg
+                enc = self.transformer_encoder(src)
+                emg_out = self.emg_output_projection(enc.transpose(1, 2)).transpose(1, 2)
+                # return a dummy action tensor so downstream code keeps working
+                if self.output_reduction_method == "none":
+                    action_len = self.window_size
+                elif self.output_reduction_method in ("pooling", "learned"):
+                    action_len = self.window_size // self.chunk_size
+                else:
+                    raise ValueError("Unknown output_reduction_method")
+                action_out = masked_emg.new_zeros(batch_size, action_len, self.action_vocab_size)
+                return emg_out, action_out
+
             # Action embedding
             action_embedded = (
                 self.action_embedding(masked_actions)

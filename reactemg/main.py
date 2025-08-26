@@ -54,10 +54,12 @@ def main(args):
 
     # Data split condition
     if args.dataset_selection == "finetune":
-        labeled_csv_paths_train, labeled_csv_paths_val = get_finetune_csv_paths(args.val_patient_ids)
+        labeled_csv_paths_train, labeled_csv_paths_val = get_finetune_csv_paths(
+            args.val_patient_ids
+        )
     elif args.dataset_selection == "mixed":
         labeled_csv_paths_train, labeled_csv_paths_val = get_csv_paths(
-            dataset_selection='roam_only',
+            dataset_selection="roam_only",
             num_classes=args.num_classes,
             roam_data_master_folder=roam_data_master_folder,
             roam_data_subfolders=roam_data_subfolders,
@@ -67,7 +69,9 @@ def main(args):
             epn_subset_percentage=args.epn_subset_percentage,
             discard_labeled_percentage=args.discard_labeled_percentage,
         )
-        val_patient_csv_paths_train, val_patient_csv_paths_val = get_finetune_csv_paths(args.val_patient_ids)
+        val_patient_csv_paths_train, val_patient_csv_paths_val = get_finetune_csv_paths(
+            args.val_patient_ids
+        )
         labeled_csv_paths_train.extend(val_patient_csv_paths_train)
         labeled_csv_paths_val = val_patient_csv_paths_val
     else:
@@ -128,7 +132,6 @@ def main(args):
     )
     print(f"Total number of samples in training: {len(dataset_train)}")
     print(f"Total number of samples in validation: {len(dataset_val)}")
-    print(f"Number of unlabeled samples in training: {len(unlabeled_csv_paths_train)}")
 
     # Model init
     model = initialize_model(args)
@@ -161,7 +164,7 @@ def main(args):
             },
         }
         add_lora(model, lora_config)
-    
+
     model.to(device)
     print(
         "Total trainable parameters:",
@@ -319,7 +322,7 @@ if __name__ == "__main__":
             "pub_with_roam_with_epn",
             "pub_with_epn",
             "finetune",
-            "mixed"
+            "mixed",
         ],
         help="Select the dataset used to train the current model",
     )
@@ -560,11 +563,27 @@ if __name__ == "__main__":
         help="Decay factor for exponential LR schedule.",
     )
     parser.add_argument(
-        "--scale_emg_loss",
-        default=0,
-        type=int,
-        choices=[0, 1],
-        help="If 1, scale emg loss (MSE) by 100 times to match the scale of the CE loss on actions",
+        "--use_db_mtl",
+        action="store_true",
+        help="Enable Dual-Balancing MTL (log-loss + gradient normalization on shared trunk).",
+    )
+    parser.add_argument(
+        "--db_beta",
+        type=float,
+        default=0.9,
+        help="EMA beta for DB-MTL's gradient smoothing (0<beta<1).",
+    )
+    parser.add_argument(
+        "--db_beta_sigma",
+        type=float,
+        default=0.5,
+        help="Exponent for step-dependent EMA: decay = beta / step**beta_sigma.",
+    )
+    parser.add_argument(
+        "--db_eps",
+        type=float,
+        default=1e-8,
+        help="Numerical epsilon added inside log(loss + eps).",
     )
     parser.add_argument(
         "--inner_window_size",

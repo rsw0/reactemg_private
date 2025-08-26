@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import socket
 import random
+import itertools
 from torch.utils.data import DataLoader, Sampler
 from minlora import get_lora_state_dict, name_is_lora
 
@@ -75,6 +76,167 @@ def initialize_training(
 ################################################
 ############### Any2Any Training ###############
 ################################################
+def _flatten_grads_for(params, grads):
+    """Flatten a list of per-parameter grads into a single vector.
+    None grads (allow_unused=True) are replaced by zeros of the right shape."""
+    flat = []
+    for p, g in zip(params, grads):
+        if g is None:
+            flat.append(torch.zeros_like(p).reshape(-1))
+        else:
+            flat.append(g.reshape(-1))
+    return (
+        torch.cat(flat) if len(flat) > 0 else torch.tensor([], device=params[0].device)
+    )
+
+
+def _assign_vec_as_grads(params, agg_vec):
+    """Write a flat vector 'agg_vec' back into param.grad tensors."""
+    offset = 0
+    for p in params:
+        n = p.numel()
+        if p.grad is None:
+            p.grad = torch.zeros_like(p)
+        p.grad.copy_(agg_vec[offset : offset + n].view_as(p))
+        offset += n
+
+
+def _split_param_groups_any2any(model):
+    """
+    Return (shared_params, emg_head_params, action_head_params)
+    based on module name prefixes. Works with or without LoRA because it
+    matches by module name prefix, not exact tensor names.
+    """
+    # Which modules count as 'heads' vs 'shared'
+    if getattr(model, "use_coarse", False):
+        emg_head_prefixes = ["upsample_emg"]  # coarse EMG head
+    else:
+        emg_head_prefixes = ["emg_output_projection"]  # fine EMG head
+
+    action_head_prefixes = ["action_output_projection"]
+    if getattr(model, "output_reduction_method", "none") == "learned":
+        action_head_prefixes.append("chunk_aggregator")
+
+    # Collect
+    shared_params, emg_head_params, action_head_params = [], [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if any(name.startswith(pref) for pref in emg_head_prefixes):
+            emg_head_params.append(p)
+        elif any(name.startswith(pref) for pref in action_head_prefixes):
+            action_head_params.append(p)
+        else:
+            shared_params.append(p)
+
+    return shared_params, emg_head_params, action_head_params
+
+
+def db_mtl_backward_any2any(
+    model,
+    emg_loss,
+    action_loss,
+    db_state,
+    db_eps,
+    db_beta,
+    db_beta_sigma,
+):
+    """
+    Perform DB-MTL backward:
+      1) Per-task grads on SHARED params from log-losses.
+      2) EMA smoothing.
+      3) Normalize each task's shared grad to equal L2 norm; aggregate with alpha = max norm.
+      4) Task-specific heads get grads from their OWN log-loss only.
+    """
+    # 1) Gather param groups
+    shared_params, emg_head_params, action_head_params = _split_param_groups_any2any(
+        model
+    )
+    if len(shared_params) == 0:
+        # Nothing to do; fallback: heads only
+        pass
+
+    # 2) Per-task shared gradients of log-loss (allow_unused: some batches may have zero masked positions)
+    losses = [emg_loss, action_loss]
+    shared_gvecs = []
+    last = len(losses) - 1
+    for i, L in enumerate(losses):
+        grads = torch.autograd.grad(
+            torch.log(L + db_eps),
+            shared_params,
+            retain_graph=True,  # we still need the graph for other grads below
+            create_graph=False,
+            allow_unused=True,
+        )
+        shared_gvecs.append(_flatten_grads_for(shared_params, grads))
+
+    # Ensure buffers on the right device even for empty grads
+    device = (
+        shared_gvecs[0].device
+        if len(shared_gvecs) > 0
+        else next(model.parameters()).device
+    )
+
+    # 3) EMA smoothing for shared grads
+    db_state["step"] = db_state.get("step", 0) + 1
+    decay = db_beta / (db_state["step"] ** db_beta_sigma)
+
+    if "buf" not in db_state or db_state["buf"] is None:
+        db_state["buf"] = [torch.zeros_like(g) for g in shared_gvecs]
+
+    new_buf = []
+    for g_curr, g_prev in itertools.zip_longest(
+        shared_gvecs, db_state["buf"], fillvalue=None
+    ):
+        if g_prev is None or g_prev.numel() == 0:
+            g_prev = torch.zeros_like(g_curr)
+        # detached EMA (training-free)
+        new_buf.append((1 - decay) * g_curr.detach() + decay * g_prev)
+    db_state["buf"] = new_buf
+
+    # 4) Normalize magnitudes to the same L2 and aggregate with alpha = max norm
+    norms = (
+        torch.stack([b.norm(p=2) + 1e-12 for b in db_state["buf"]])
+        if len(db_state["buf"]) > 0
+        else torch.tensor([1.0], device=device)
+    )
+    alpha = norms.max()
+    agg_vec = (
+        sum(alpha * (b / n) for b, n in zip(db_state["buf"], norms))
+        if len(db_state["buf"]) > 0
+        else torch.tensor([], device=device)
+    )
+
+    # 5) Write aggregated shared gradient back to model params
+    if agg_vec.numel() > 0 and len(shared_params) > 0:
+        _assign_vec_as_grads(shared_params, agg_vec)
+
+    # 6) Head grads: each head gets its own log-loss gradient
+    # EMG head
+    if len(emg_head_params) > 0:
+        head_grads = torch.autograd.grad(
+            torch.log(emg_loss + db_eps),
+            emg_head_params,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        for p, g in zip(emg_head_params, head_grads):
+            if g is not None:
+                p.grad = g if p.grad is None else (p.grad + g)
+
+    # Action head
+    if len(action_head_params) > 0:
+        head_grads = torch.autograd.grad(
+            torch.log(action_loss + db_eps),
+            action_head_params,
+            retain_graph=False,
+            allow_unused=True,
+        )
+        for p, g in zip(action_head_params, head_grads):
+            if g is not None:
+                p.grad = g if p.grad is None else (p.grad + g)
+
+
 class LabeledUnlabeledSampler(Sampler):
     def __init__(self, labeled_indices, unlabeled_indices, batch_size):
         self.labeled_indices = labeled_indices
@@ -103,7 +265,9 @@ class LabeledUnlabeledSampler(Sampler):
         return iter(all_batches)
 
     def __len__(self):
-        return math.ceil(len(self.labeled_indices)/self.batch_size) + math.ceil(len(self.unlabeled_indices)/self.batch_size)
+        return math.ceil(len(self.labeled_indices) / self.batch_size) + math.ceil(
+            len(self.unlabeled_indices) / self.batch_size
+        )
 
 
 def compute_parameter_changes(model, initial_lora_params, initial_non_lora_params):
@@ -230,10 +394,7 @@ def process_batch(batch_data, model, args_dict, device, cost_sensitive_loss):
             action_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
         # 5) Combine
-        if args_dict["scale_emg_loss"] == 1:
-            total_loss = 100.0 * emg_loss + action_loss
-        else:
-            total_loss = emg_loss + action_loss
+        total_loss = emg_loss + action_loss
 
         return (
             emg_loss,
@@ -334,10 +495,7 @@ def process_batch(batch_data, model, args_dict, device, cost_sensitive_loss):
             emg_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
         # 5) Combine
-        if args_dict["scale_emg_loss"] == 1:
-            total_loss = 100.0 * emg_loss + action_loss
-        else:
-            total_loss = emg_loss + action_loss
+        total_loss = emg_loss + action_loss
 
         return (
             emg_loss,
@@ -357,6 +515,7 @@ def train_one_epoch(
     args_dict,
     cost_sensitive_loss,
     global_step,
+    db_state=None,
 ):
     """
     Runs one epoch of training.
@@ -381,7 +540,19 @@ def train_one_epoch(
             batch_data, model, args_dict, device, cost_sensitive_loss
         )
 
-        combined_loss.backward()
+        if args_dict.get("use_db_mtl", False):
+            # Dual-Balancing: log-loss + gradient normalization on SHARED, per-head grads on HEADS
+            db_mtl_backward_any2any(
+                model,
+                emg_loss=emg_loss,
+                action_loss=action_loss,
+                db_state=db_state,
+                db_eps=args_dict["db_eps"],
+                db_beta=args_dict["db_beta"],
+                db_beta_sigma=args_dict["db_beta_sigma"],
+            )
+        else:
+            combined_loss.backward()
 
         # Compute gradient norm
         grad_norm = 0
@@ -535,6 +706,9 @@ def train_any2any(
     # override, not being used
     cost_sensitive_loss = None
 
+    # Keep DB-MTL state across steps (EMA buffer + step)
+    db_state = {"step": 0, "buf": None}
+
     # Train and Validation Loop
     for epoch in range(epochs):
         # Apply updates to the dataset and construct new dataloaders for curriculum learning
@@ -603,6 +777,7 @@ def train_any2any(
             args_dict=args_dict,
             cost_sensitive_loss=cost_sensitive_loss,
             global_step=global_step,
+            db_state=db_state,
         )
         # Update global_step from returned dictionary
         global_step = train_stats["global_step"]

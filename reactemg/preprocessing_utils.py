@@ -288,73 +288,72 @@ def get_unlabeled_csv_paths(
     unlabeled_percentage: float,
 ) -> List[str]:
     """
-    Recursively gather all .csv and .npy files under `unlabeled_data_folder`
-    (e.g., '../data/unlabeled_data'), apply EMG-EPN-612/testingJSON filtering,
-    remove collisions with labeled data, and optionally sub-sample by
-    `unlabeled_percentage`.
+    Recursively gather .csv/.npy under `unlabeled_data_folder` (e.g. '../data/unlabeled_data'),
+    apply EMG-EPN-612/testingJSON filtering, remove collisions with labeled data using
+    (parent_dir_name, filename) keys (Linux, case-sensitive), then sub-sample by
+    `unlabeled_percentage` deterministically.
 
     Rules
     -----
-    1) Recursively include all .csv/.npy under `unlabeled_data_folder`.
-    2) If the *top-level* child folder is 'EMG-EPN-612', ignore any files
-       within subtrees whose directory name contains 'testingJSON'
-       (case-insensitive), e.g.:
-          ../data/unlabeled_data/EMG-EPN-612/testingJSON_user221/**  -> ignore
-          ../data/unlabeled_data/EMG-EPN-612/trainingJSON_user166/** -> include
-    3) Remove any unlabeled files whose basenames collide with labeled
-       train/val basenames.
-    4) Keep the fraction specified by `unlabeled_percentage`:
-         - <= 0.0 -> keep none
-         - >= 1.0 -> keep all
-         - (0,1)  -> deterministic random sample of that fraction
+    1) Include .csv/.npy from all subfolders recursively.
+    2) If the top-level child under `unlabeled_data_folder` is 'EMG-EPN-612',
+       ignore any subtree whose directory name contains 'testingJSON' (case-insensitive),
+       e.g. '../data/unlabeled_data/EMG-EPN-612/testingJSON_user221/**' is excluded.
+    3) Collision removal is based on (immediate_parent_folder_name, basename) pairs.
+       On Linux this is case-sensitive.
+    4) Sub-sample by `unlabeled_percentage` (0.0 => none, 1.0 => all, else deterministic).
 
     Returns
     -------
-    List[str] : Final list of selected unlabeled file paths (sorted).
+    List[str]: Sorted list of selected unlabeled file paths.
     """
-    # Defensive defaults in case None is passed
+
     labeled_paths_train = labeled_paths_train or []
     labeled_paths_val = labeled_paths_val or []
 
-    def is_under_epn612(curr_root: str) -> bool:
-        """Return True if `curr_root` is inside the top-level 'EMG-EPN-612' subtree."""
+    def _top_is_epn612(curr_root: str) -> bool:
+        """True if `curr_root` is inside the top-level 'EMG-EPN-612' subtree."""
         rel = os.path.relpath(curr_root, unlabeled_data_folder)
         if rel == ".":
             return False
         top_level = rel.split(os.sep, 1)[0]
-        return top_level == "EMG-EPN-612"
+        return top_level == "EMG-EPN-612"  # exact match; Linux is case-sensitive
+
+    def _key_parent_basename(p: str) -> Tuple[str, str]:
+        """Collision key: (immediate parent dir name, filename)."""
+        parent = os.path.basename(os.path.dirname(p.rstrip(os.sep)))
+        base = os.path.basename(p)
+        return (parent, base)
 
     all_unlabeled_paths: List[str] = []
 
-    # Walk the tree; prune 'testingJSON*' subtrees only when under EMG-EPN-612
+    # Walk and prune testingJSON* only under EMG-EPN-612
     for root, dirs, files in os.walk(unlabeled_data_folder):
-        if is_under_epn612(root):
-            # If the *current* directory is a testingJSON* folder, prune the entire subtree.
+        if _top_is_epn612(root):
+            # If current directory itself is testingJSON*, skip its subtree entirely.
             if "testingjson" in os.path.basename(root).lower():
-                dirs[:] = []  # don't descend further
+                dirs[:] = []
                 continue
-            # Also prevent descending into any immediate testingJSON* subdirectories.
+            # Also prevent descending into any immediate testingJSON* children.
             dirs[:] = [d for d in dirs if "testingjson" not in d.lower()]
 
-        # Collect files from this directory
-        for fname in sorted(files):
+        for fname in sorted(files):  # deterministic file order
             lower = fname.lower()
             if lower.endswith(".csv") or lower.endswith(".npy"):
-                full_path = os.path.join(root, fname)
-                all_unlabeled_paths.append(full_path)
+                all_unlabeled_paths.append(os.path.join(root, fname))
 
-    # Collision removal using basenames
-    labeled_basenames = {
-        os.path.basename(p) for p in list(labeled_paths_train) + list(labeled_paths_val)
+    # --- Collision removal (Linux, case-sensitive) on (parent, basename) ---
+    labeled_keys = {
+        _key_parent_basename(p) for p in list(labeled_paths_train) + list(labeled_paths_val)
     }
     cleaned_unlabeled = [
-        p for p in all_unlabeled_paths if os.path.basename(p) not in labeled_basenames
+        p for p in all_unlabeled_paths if _key_parent_basename(p) not in labeled_keys
     ]
 
     print(f"[get_unlabeled_csv_paths] Found {len(all_unlabeled_paths)} raw unlabeled files.")
     print(f"[get_unlabeled_csv_paths] After removing collisions: {len(cleaned_unlabeled)}")
 
-    # Sub-sample by unlabeled_percentage (deterministic)
+    # --- Sub-sample by unlabeled_percentage (deterministic) ---
     cleaned_unlabeled = sorted(cleaned_unlabeled)
     if unlabeled_percentage <= 0.0:
         final_unlabeled_paths: List[str] = []
@@ -363,7 +362,7 @@ def get_unlabeled_csv_paths(
     else:
         num_to_keep = int(len(cleaned_unlabeled) * unlabeled_percentage)
         if num_to_keep > 0:
-            rng = random.Random(0)  # deterministic selection across runs/machines
+            rng = random.Random(0)  # deterministic across runs/machines
             final_unlabeled_paths = sorted(rng.sample(cleaned_unlabeled, num_to_keep))
         else:
             final_unlabeled_paths = []
@@ -372,7 +371,12 @@ def get_unlabeled_csv_paths(
         f"[get_unlabeled_csv_paths] Sub-sampled {len(final_unlabeled_paths)} unlabeled files "
         f"out of {len(cleaned_unlabeled)} possible."
     )
+
     return final_unlabeled_paths
+
+    
+
+
 
 
 def get_finetune_csv_paths(
