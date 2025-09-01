@@ -520,7 +520,7 @@ class Any2Any_Model(nn.Module):
                     # block EMG from attending to Action
                     attention_mask[b, :self.window_size, self.window_size:2*self.window_size] = True
                     # block Action from attending to EMG
-                    attention_mask[b, self.window_size:2*self.window_size, self.window_size] = True 
+                    attention_mask[b, self.window_size:2*self.window_size, :self.window_size] = True
                     # Create an diagonal attention mask (which only allows for self-attention) for the action segment of the sequence
                     # (the lower right corner on the attention map for the attention FROM action To action)
                     temp_block = torch.ones(self.window_size, self.window_size, dtype=torch.bool, device=src.device)
@@ -620,7 +620,7 @@ class Any2Any_Model(nn.Module):
                     # block EMG from attending to Action
                     attention_mask[b, :self.window_size, self.window_size:2*self.window_size] = True
                     # block Action from attending to EMG
-                    attention_mask[b, self.window_size:2*self.window_size, self.window_size] = True 
+                    attention_mask[b, self.window_size:2*self.window_size, :self.window_size] = True
                     # Create an diagonal attention mask (which only allows for self-attention) for the action segment of the sequence
                     # (the lower right corner on the attention map for the attention FROM action To action)
                     temp_block = torch.ones(self.window_size, self.window_size, dtype=torch.bool, device=src.device)

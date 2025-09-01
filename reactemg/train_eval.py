@@ -762,7 +762,7 @@ def train_any2any(
         dataloader_val = DataLoader(
             dataset_val,
             batch_size=args_dict["batch_size"] // 2,
-            shuffle=True,
+            shuffle=False,
             pin_memory=True,
             num_workers=4,
         )

@@ -660,10 +660,12 @@ class Any2Any_Dataset(Dataset):
                             embedding_method,
                             medfilt_order,
                             hand_choice,
+                            is_unlabeled=True,
                         )
                     )
                     self.all_data.extend(temp_raw_unlabeled_data)
-                    self.all_data.extend(temp_noisy_unlabeled_data)
+                    # Noise OFF
+                    # self.all_data.extend(temp_noisy_unlabeled_data)
 
             if 3 not in self.task_selection:
                 self.len_multiplier = len(self.task_selection)
@@ -767,6 +769,7 @@ class Any2Any_Dataset(Dataset):
         embedding_method,
         medfilt_order,
         hand_choice,
+        is_unlabeled=False,
     ):
         extracted_samples = []
         extracted_unlabeled_samples = []
@@ -775,7 +778,14 @@ class Any2Any_Dataset(Dataset):
             df = pd.read_csv(path)
             if "gt" not in df.columns:
                 raise Exception("gt column not found")
-            action_sequence = df["gt"].to_numpy()
+            # Force-remove gt from unlabeled samples
+            if not is_unlabeled:
+                if "gt" not in df.columns:
+                    raise Exception("gt column not found")
+                action_sequence = df["gt"].to_numpy()
+            else:
+                # No labels for unlabeled data
+                action_sequence = np.full((len(df),), fill_value=-1, dtype=np.int64)
             try:
                 df_emg = df[
                     [
@@ -819,8 +829,14 @@ class Any2Any_Dataset(Dataset):
 
         elif path.lower().endswith(".npy"):
             loaded = np.load(path).astype(np.float32)
-            action_sequence = loaded[:, 0]
-            data_array = loaded[:, 1:]
+            if is_unlabeled:
+                action_sequence = np.full(
+                    (loaded.shape[0],), fill_value=-1, dtype=np.int64
+                )
+                data_array = loaded[:, 1:]  # EMG
+            else:
+                action_sequence = loaded[:, 0].astype(np.int64)
+                data_array = loaded[:, 1:]
             if hand_choice == "left":
                 remap_order = [6, 5, 4, 3, 2, 1, 0, 7]
                 data_array = data_array[:, remap_order]
@@ -896,9 +912,12 @@ class Any2Any_Dataset(Dataset):
                 transition_list = np.where(
                     windowed_action_sequence[:-1] != windowed_action_sequence[1:]
                 )[0]
-                transition_index = (
-                    transition_list[0] if len(transition_list) > 0 else -1
-                )
+                # Force-edit transition index
+                if is_unlabeled:
+                    transition_index = -1
+                else:
+                    transition_list = np.where(windowed_action_sequence[:-1] != windowed_action_sequence[1:])[0]
+                    transition_index = transition_list[0] if len(transition_list) > 0 else -1
 
                 if self.window_size > self.inner_window_size:
                     coarse_length = self.window_size // self.inner_window_size
