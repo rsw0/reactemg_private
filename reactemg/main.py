@@ -102,14 +102,23 @@ def main(args):
 
     # Unlabeled processing
     if args.model_choice == "any2any" and 3 in args.task_selection:
+        # Subjects that appear in labeled train+val (EPN only)
+        epn_labeled_subjects = {
+            os.path.basename(os.path.dirname(p))
+            for p in (labeled_csv_paths_train + labeled_csv_paths_val)
+            if "EMG-EPN-612" in os.path.normpath(p).split(os.sep)
+        }
+
         unlabeled_csv_paths_train = get_unlabeled_csv_paths(
             unlabeled_data_folder="../data/unlabeled_data",
             labeled_paths_train=labeled_csv_paths_train,
             labeled_paths_val=labeled_csv_paths_val,
             unlabeled_percentage=args.unlabeled_percentage,
+            exclude_subjects=epn_labeled_subjects,
         )
         unlabeled_csv_paths_train = sorted(list(set(unlabeled_csv_paths_train)))
         print(f"Final total unlabeled files: {len(unlabeled_csv_paths_train)}")
+
 
     # Define mask tokens
     if args.num_classes not in [3, 6]:

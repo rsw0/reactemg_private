@@ -18,6 +18,48 @@ from dataset import (
 )
 
 
+def _collect_epn_subject_files(
+    epn_root: str, num_classes: int, include_testing: bool = False
+):
+    """
+    Return: dict {subject_folder_name -> [file_paths]}
+    subject_folder_name is e.g. 'trainingJSON_user123'
+    """
+    subject_to_files = {}
+    if not os.path.isdir(epn_root):
+        raise ValueError(f"EPN data folder does not exist: {epn_root}")
+
+    for subject_folder in os.listdir(epn_root):
+        subj_path = os.path.join(epn_root, subject_folder)
+        if not os.path.isdir(subj_path):
+            continue
+
+        # Control which subject folders are eligible for labeled data
+        if subject_folder.startswith("testingJSON_user") and not include_testing:
+            continue
+        if not (
+            subject_folder.startswith("trainingJSON_user")
+            or subject_folder.startswith("testingJSON_user")
+        ):
+            # Ignore any odd folders
+            continue
+
+        # Flat (no deeper nesting); take only .npy
+        files = []
+        for fname in os.listdir(subj_path):
+            if not fname.lower().endswith(".npy"):
+                continue
+            fname_lc = fname.lower()
+            # still respect 3-class skips
+            if num_classes == 3:
+                if any(k in fname_lc for k in ("wavein", "waveout", "pinch")):
+                    continue
+            files.append(os.path.join(subj_path, fname))
+        if files:
+            subject_to_files[subject_folder] = sorted(files)
+    return subject_to_files
+
+
 def parse_tuple(s):
     try:
         return tuple(map(float, s.strip("()").split(",")))
@@ -78,78 +120,57 @@ def get_csv_paths(
         val_patient_ids = []
 
     # =========================================================
-    # MODE: "pub_with_epn"
-    #   - Combine public + EPN only
-    #   - Apply "pub_with_roam_with_epn"-style EPN logic:
-    #       (skip wave/pinch if num_classes==3, keep only open/fist, downsample)
-    #   - Then 5% of combined => val, rest => train.
+    # MODE: "pub_with_epn" and "epn_only" (SUBJECT-WISE EPN)
     # =========================================================
     if dataset_selection in ["pub_with_epn", "epn_only"]:
-        # 1) Gather Public data
+        # 1) Public data (only for pub_with_epn)
         pub_paths = []
-        if dataset_selection in ["pub_with_epn"]:
+        if dataset_selection == "pub_with_epn":
             for pub_folder in public_data_folders:
-                csv_files = glob.glob(
-                    os.path.join(pub_folder, "**", "*.csv"), recursive=True
+                pub_paths.extend(
+                    glob.glob(os.path.join(pub_folder, "**", "*.csv"), recursive=True)
                 )
-                pub_paths.extend(csv_files)
 
-        # 2) Gather EPN data
-        if not os.path.isdir(epn_data_master_folder):
-            raise ValueError(
-                f"EPN data folder does not exist: {epn_data_master_folder}"
-            )
+        # 2) EPN by subject (labeled split)
+        subject_to_files = _collect_epn_subject_files(
+            epn_data_master_folder, num_classes=num_classes, include_testing=False
+        )
+        subjects = sorted(subject_to_files.keys())
 
-        epn_file_paths = []
-        for subject_folder in os.listdir(epn_data_master_folder):
-            subject_folder_path = os.path.join(epn_data_master_folder, subject_folder)
+        # Choose a SUBJECT subset for labeled training according to epn_subset_percentage
+        # (deterministic because you seed random in main.py)
+        random.shuffle(subjects)
+        if epn_subset_percentage >= 1.0:
+            labeled_subjects = set(subjects)
+        else:
+            n_lab_subj = max(1, int(len(subjects) * epn_subset_percentage))
+            labeled_subjects = set(subjects[:n_lab_subj])
 
-            # Skip non-directories or "testingJSON_user..." folders
-            if not os.path.isdir(subject_folder_path):
-                continue
-            if subject_folder.startswith("testingJSON_user"):
-                continue
+        epn_labeled_paths = []
+        for s in labeled_subjects:
+            epn_labeled_paths.extend(subject_to_files[s])
 
-            # Gather the .npy files
-            for fname in os.listdir(subject_folder_path):
-                if not fname.lower().endswith(".npy"):
-                    continue
-
-                fname_lc = fname.lower()
-                full_path = os.path.join(subject_folder_path, fname)
-
-                # Skip wave/pinch if num_classes==3
-                if num_classes == 3:
-                    skip_substrings = ["wavein", "waveout", "pinch"]
-                    if any(sub in fname_lc for sub in skip_substrings):
-                        continue
-
-                epn_file_paths.append(full_path)
-
-        # When we have the public dataset, keep only "open" or "fist" (same logic as "pub_with_roam_with_epn")
-        if dataset_selection in ["pub_with_epn"]:
-            epn_file_paths = [
+        # For pub_with_epn we also previously filtered to only open/fist; keep that if desired:
+        if dataset_selection == "pub_with_epn":
+            epn_labeled_paths = [
                 p
-                for p in epn_file_paths
+                for p in epn_labeled_paths
                 if (
                     "open" in os.path.basename(p).lower()
                     or "fist" in os.path.basename(p).lower()
                 )
             ]
 
-        # Downsample EPN to epn_subset_percentage
-        random.shuffle(epn_file_paths)
-        subset_size = int(len(epn_file_paths) * epn_subset_percentage)
-        epn_file_paths = epn_file_paths[:subset_size]
+        # 3) Combine Public + EPN (labeled)
+        combined_paths = pub_paths + epn_labeled_paths
+        combined_paths.sort()
 
-        # Combine Public + EPN
-        combined_paths = pub_paths + epn_file_paths
-        random.shuffle(combined_paths)
-
-        # 3) Split 5% for validation
+        # 4) Validation split (same simple 5% file-wise split as before; consider switching to subject-wise later)
         val_size = int(0.05 * len(combined_paths))
         val_paths = combined_paths[:val_size]
         train_paths = combined_paths[val_size:]
+
+        # We will derive the set of labeled EPN subjects later from train/val paths
 
     else:
         # ================================
@@ -286,75 +307,113 @@ def get_unlabeled_csv_paths(
     labeled_paths_train: Sequence[str],
     labeled_paths_val: Sequence[str],
     unlabeled_percentage: float,
+    exclude_subjects: Sequence[str] = None,
 ) -> List[str]:
     """
     Recursively gather .csv/.npy under `unlabeled_data_folder` (e.g. '../data/unlabeled_data'),
-    apply EMG-EPN-612/testingJSON filtering, remove collisions with labeled data using
-    (parent_dir_name, filename) keys (Linux, case-sensitive), then sub-sample by
-    `unlabeled_percentage` deterministically.
+    apply EMG-EPN-612/testingJSON filtering, exclude whole EPN subjects via `exclude_subjects`,
+    remove collisions with labeled train/val using normalized keys, then sub-sample
+    by `unlabeled_percentage` deterministically.
 
-    Rules
-    -----
-    1) Include .csv/.npy from all subfolders recursively.
-    2) If the top-level child under `unlabeled_data_folder` is 'EMG-EPN-612',
-       ignore any subtree whose directory name contains 'testingJSON' (case-insensitive),
-       e.g. '../data/unlabeled_data/EMG-EPN-612/testingJSON_user221/**' is excluded.
-    3) Collision removal is based on (immediate_parent_folder_name, basename) pairs.
-       On Linux this is case-sensitive.
-    4) Sub-sample by `unlabeled_percentage` (0.0 => none, 1.0 => all, else deterministic).
+    Args
+    ----
+    unlabeled_data_folder : str
+        Root folder that contains an 'EMG-EPN-612' mirror (and optionally others).
+    labeled_paths_train : Sequence[str]
+        Labeled training file paths (for collision removal).
+    labeled_paths_val : Sequence[str]
+        Labeled validation file paths (for collision removal).
+    unlabeled_percentage : float
+        0.0 => none, 1.0 => all, (0,1) => deterministic sample.
+    exclude_subjects : Sequence[str], optional
+        EPN subject folder names (e.g. 'trainingJSON_user123') to EXCLUDE entirely
+        from unlabeled selection. This enforces subject-disjoint splits.
 
     Returns
     -------
-    List[str]: Sorted list of selected unlabeled file paths.
+    List[str] : Sorted unlabeled file paths that passed all filters.
     """
+    import os, re, random
 
     labeled_paths_train = labeled_paths_train or []
     labeled_paths_val = labeled_paths_val or []
+    exclude_subjects = set(exclude_subjects or [])
 
+    # Identify if current walk location is under the top-level EMG-EPN-612 subtree
     def _top_is_epn612(curr_root: str) -> bool:
-        """True if `curr_root` is inside the top-level 'EMG-EPN-612' subtree."""
         rel = os.path.relpath(curr_root, unlabeled_data_folder)
         if rel == ".":
             return False
         top_level = rel.split(os.sep, 1)[0]
-        return top_level == "EMG-EPN-612"  # exact match; Linux is case-sensitive
+        return top_level == "EMG-EPN-612"  # exact match (Linux case-sensitive)
 
-    def _key_parent_basename(p: str) -> Tuple[str, str]:
-        """Collision key: (immediate parent dir name, filename)."""
+    # Extract the EPN subject folder name (immediate child under EMG-EPN-612)
+    def _epn_subject_from_path(p: str) -> str:
+        parts = os.path.normpath(p).split(os.sep)
+        if "EMG-EPN-612" in parts:
+            i = parts.index("EMG-EPN-612")
+            if i + 1 < len(parts):
+                return parts[i + 1]
+        # Fallback: parent dirname
+        return os.path.basename(os.path.dirname(p.rstrip(os.sep)))
+
+    # Normalize basenames by stripping optional "...unlabel" before extension
+    UNLABEL_RE = re.compile(r"([_\-.]?unlabel)(?=\.[^.]+$)", re.IGNORECASE)
+
+    def _normalize_basename(base: str) -> str:
+        return UNLABEL_RE.sub("", base)
+
+    # Key used for collision removal: (immediate_parent_dir, normalized_basename)
+    def _key_parent_normbase(p: str) -> Tuple[str, str]:
         parent = os.path.basename(os.path.dirname(p.rstrip(os.sep)))
         base = os.path.basename(p)
-        return (parent, base)
+        return (parent, _normalize_basename(base))
 
+    # -------- Walk unlabeled tree --------
     all_unlabeled_paths: List[str] = []
-
-    # Walk and prune testingJSON* only under EMG-EPN-612
     for root, dirs, files in os.walk(unlabeled_data_folder):
         if _top_is_epn612(root):
-            # If current directory itself is testingJSON*, skip its subtree entirely.
+            # Fully prune any testingJSON* subtree
             if "testingjson" in os.path.basename(root).lower():
-                dirs[:] = []
+                dirs[:] = []  # don't descend further
                 continue
-            # Also prevent descending into any immediate testingJSON* children.
+            # Also prevent descending into any immediate testingJSON* children
             dirs[:] = [d for d in dirs if "testingjson" not in d.lower()]
 
-        for fname in sorted(files):  # deterministic file order
+        for fname in sorted(files):  # deterministic order
             lower = fname.lower()
-            if lower.endswith(".csv") or lower.endswith(".npy"):
-                all_unlabeled_paths.append(os.path.join(root, fname))
+            if not (lower.endswith(".csv") or lower.endswith(".npy")):
+                continue
 
-    # --- Collision removal (Linux, case-sensitive) on (parent, basename) ---
+            full_path = os.path.join(root, fname)
+
+            # If this file is under the EPN mirror, enforce subject exclusions
+            if _top_is_epn612(root):
+                subj = _epn_subject_from_path(full_path)
+                if subj in exclude_subjects:
+                    continue
+
+            all_unlabeled_paths.append(full_path)
+
+    print(
+        f"[get_unlabeled_csv_paths] Found {len(all_unlabeled_paths)} raw unlabeled files after subject/testing filters."
+    )
+
+    # -------- Collision removal vs labeled train/val (handles '...unlabel' renames) --------
     labeled_keys = {
-        _key_parent_basename(p) for p in list(labeled_paths_train) + list(labeled_paths_val)
+        _key_parent_normbase(p)
+        for p in list(labeled_paths_train) + list(labeled_paths_val)
     }
     cleaned_unlabeled = [
-        p for p in all_unlabeled_paths if _key_parent_basename(p) not in labeled_keys
+        p for p in all_unlabeled_paths if _key_parent_normbase(p) not in labeled_keys
     ]
+    print(
+        f"[get_unlabeled_csv_paths] After removing collisions with labeled train/val: {len(cleaned_unlabeled)}"
+    )
 
-    print(f"[get_unlabeled_csv_paths] Found {len(all_unlabeled_paths)} raw unlabeled files.")
-    print(f"[get_unlabeled_csv_paths] After removing collisions: {len(cleaned_unlabeled)}")
-
-    # --- Sub-sample by unlabeled_percentage (deterministic) ---
     cleaned_unlabeled = sorted(cleaned_unlabeled)
+
+    # -------- Deterministic sub-sampling --------
     if unlabeled_percentage <= 0.0:
         final_unlabeled_paths: List[str] = []
     elif unlabeled_percentage >= 1.0:
@@ -362,21 +421,31 @@ def get_unlabeled_csv_paths(
     else:
         num_to_keep = int(len(cleaned_unlabeled) * unlabeled_percentage)
         if num_to_keep > 0:
-            rng = random.Random(0)  # deterministic across runs/machines
+            rng = random.Random(0)  # deterministic
             final_unlabeled_paths = sorted(rng.sample(cleaned_unlabeled, num_to_keep))
         else:
             final_unlabeled_paths = []
+
+    # Optional sanity: verify no excluded subjects slipped through
+    if exclude_subjects:
+        unlabeled_subjects = set()
+        for p in final_unlabeled_paths:
+            parts = os.path.normpath(p).split(os.sep)
+            if "EMG-EPN-612" in parts:
+                i = parts.index("EMG-EPN-612")
+                if i + 1 < len(parts):
+                    unlabeled_subjects.add(parts[i + 1])
+        overlap = unlabeled_subjects & exclude_subjects
+        if overlap:
+            print(
+                f"[get_unlabeled_csv_paths][WARNING] {len(overlap)} excluded EPN subjects still present: {sorted(list(overlap))[:5]} ..."
+            )
 
     print(
         f"[get_unlabeled_csv_paths] Sub-sampled {len(final_unlabeled_paths)} unlabeled files "
         f"out of {len(cleaned_unlabeled)} possible."
     )
-
     return final_unlabeled_paths
-
-    
-
-
 
 
 def get_finetune_csv_paths(
