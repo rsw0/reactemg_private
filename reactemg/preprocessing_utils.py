@@ -1,6 +1,7 @@
 import argparse
 import random
 import os
+import re
 import glob
 import math
 from typing import List, Tuple, Sequence
@@ -333,7 +334,6 @@ def get_unlabeled_csv_paths(
     -------
     List[str] : Sorted unlabeled file paths that passed all filters.
     """
-    import os, re, random
 
     labeled_paths_train = labeled_paths_train or []
     labeled_paths_val = labeled_paths_val or []
