@@ -16,6 +16,7 @@ from preprocessing_utils import (
     lr_lambda_cosine,
     lr_lambda_linear,
     lr_lambda_exponential,
+    split_roam_subjects_subjectwise,
 )
 from torch.optim.lr_scheduler import LambdaLR
 from train_eval import initialize_training
@@ -98,27 +99,91 @@ def main(args):
         p for p in labeled_csv_paths_val if "unlabel" not in os.path.basename(p).lower()
     ]
     print(f"labeled CSVs in training set: {len(labeled_csv_paths_train)}")
+
+    #   - setting --roam_labeled_subject_prop < 1.0, and
+    #   - setting --roam_labeled_only_mode 1.
+    roam_labeled_subjects = []
+    roam_unlabeled_subjects = []
+    roam_unlabeled_paths = []
+    should_split_roam = args.dataset_selection == "roam_only" and (
+        args.roam_labeled_subject_prop < 1.0 and args.roam_labeled_only_mode == 1
+    )
+    if should_split_roam:
+        split_seed = (
+            args.roam_subject_split_seed
+            if args.roam_subject_split_seed is not None
+            else args.seed
+        )
+        (
+            labeled_after_split,
+            roam_unlabeled_paths,
+            roam_labeled_subjects,
+            roam_unlabeled_subjects,
+        ) = split_roam_subjects_subjectwise(
+            train_paths=labeled_csv_paths_train,
+            val_patient_ids=args.val_patient_ids,
+            labeled_prop=args.roam_labeled_subject_prop,
+            seed=split_seed,
+        )
+        labeled_csv_paths_train = labeled_after_split
+        print(
+            f"ROAM subject split (prop={args.roam_labeled_subject_prop}): "
+            f"{len(roam_labeled_subjects)} labeled subjects, "
+            f"{len(roam_unlabeled_subjects)} unlabeled subjects."
+        )
+        if roam_labeled_subjects:
+            print(f"  Labeled subjects:   {roam_labeled_subjects}")
+        if roam_unlabeled_subjects:
+            print(f"  Unlabeled subjects: {roam_unlabeled_subjects}")
+
+    # Print counts after potential split (or unchanged otherwise)
+    print(f"labeled CSVs in training set: {len(labeled_csv_paths_train)}")
     print(f"labeled CSVs in validation set: {len(labeled_csv_paths_val)}")
 
     # Unlabeled processing
     if args.model_choice == "any2any" and 3 in args.task_selection:
-        # Subjects that appear in labeled train+val (EPN only)
-        epn_labeled_subjects = {
-            os.path.basename(os.path.dirname(p))
-            for p in (labeled_csv_paths_train + labeled_csv_paths_val)
-            if "EMG-EPN-612" in os.path.normpath(p).split(os.sep)
-        }
-
-        unlabeled_csv_paths_train = get_unlabeled_csv_paths(
-            unlabeled_data_folder="../data/unlabeled_data",
-            labeled_paths_train=labeled_csv_paths_train,
-            labeled_paths_val=labeled_csv_paths_val,
-            unlabeled_percentage=args.unlabeled_percentage,
-            exclude_subjects=epn_labeled_subjects,
-        )
-        unlabeled_csv_paths_train = sorted(list(set(unlabeled_csv_paths_train)))
-        print(f"Final total unlabeled files: {len(unlabeled_csv_paths_train)}")
-
+        if args.dataset_selection == "roam_only":
+            if should_split_roam:
+                # Semi-supervised ROAM split (unless labeled-only mode)
+                if args.roam_labeled_only_mode == 0:
+                    unlabeled_csv_paths_train = sorted(list(set(roam_unlabeled_paths)))
+                else:
+                    unlabeled_csv_paths_train = []
+                print(
+                    f"Final total unlabeled files (ROAM split): {len(unlabeled_csv_paths_train)}"
+                )
+            else:
+                # Legacy behavior (unchanged): use ../data/unlabeled_data (e.g., EPN mirror)
+                epn_labeled_subjects = {
+                    os.path.basename(os.path.dirname(p))
+                    for p in (labeled_csv_paths_train + labeled_csv_paths_val)
+                    if "EMG-EPN-612" in os.path.normpath(p).split(os.sep)
+                }
+                unlabeled_csv_paths_train = get_unlabeled_csv_paths(
+                    unlabeled_data_folder="../data/unlabeled_data",
+                    labeled_paths_train=labeled_csv_paths_train,
+                    labeled_paths_val=labeled_csv_paths_val,
+                    unlabeled_percentage=args.unlabeled_percentage,
+                    exclude_subjects=epn_labeled_subjects,
+                )
+                unlabeled_csv_paths_train = sorted(list(set(unlabeled_csv_paths_train)))
+                print(f"Final total unlabeled files: {len(unlabeled_csv_paths_train)}")
+        else:
+            # Original non-ROAM-only unlabeled logic (unchanged)
+            epn_labeled_subjects = {
+                os.path.basename(os.path.dirname(p))
+                for p in (labeled_csv_paths_train + labeled_csv_paths_val)
+                if "EMG-EPN-612" in os.path.normpath(p).split(os.sep)
+            }
+            unlabeled_csv_paths_train = get_unlabeled_csv_paths(
+                unlabeled_data_folder="../data/unlabeled_data",
+                labeled_paths_train=labeled_csv_paths_train,
+                labeled_paths_val=labeled_csv_paths_val,
+                unlabeled_percentage=args.unlabeled_percentage,
+                exclude_subjects=epn_labeled_subjects,
+            )
+            unlabeled_csv_paths_train = sorted(list(set(unlabeled_csv_paths_train)))
+            print(f"Final total unlabeled files: {len(unlabeled_csv_paths_train)}")
 
     # Define mask tokens
     if args.num_classes not in [3, 6]:
@@ -236,6 +301,8 @@ def main(args):
     if args.model_choice == "ann":
         args_dict["precomputed_mean"] = dataset_train.mean_
         args_dict["precomputed_std"] = dataset_train.std_
+    args_dict["roam_labeled_subjects"] = roam_labeled_subjects
+    args_dict["roam_unlabeled_subjects"] = roam_unlabeled_subjects
 
     # Training
     initialize_training(
@@ -612,6 +679,33 @@ if __name__ == "__main__":
         type=int,
         default=25,
         help="Stride for MAV subwindow when use_mav_for_emg=1, analogous to ED-TCN's inner_stride (e.g. 25).",
+    )
+
+    parser.add_argument(
+        "--roam_labeled_subject_prop",
+        type=float,
+        default=1.0,
+        help=(
+            "When --dataset_selection roam_only: fraction [0,1] of **ROAM subjects** "
+            "(excluding --val_patient_ids) to treat as LABELED; the rest become UNLABELED. "
+            "E.g., 0.2 => ~20% of the remaining ROAM subjects are labeled."
+        ),
+    )
+    parser.add_argument(
+        "--roam_labeled_only_mode",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help=(
+            "If 1, after the subject-level split keep only the LABELED portion "
+            "and discard the UNLABELED portion (labeled-only baseline)."
+        ),
+    )
+    parser.add_argument(
+        "--roam_subject_split_seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed used only for the ROAM subject split (defaults to --seed).",
     )
 
     args = parser.parse_args()

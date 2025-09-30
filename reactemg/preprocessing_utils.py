@@ -68,6 +68,84 @@ def parse_tuple(s):
         raise argparse.ArgumentTypeError("Tuples must be in the form x,y")
 
 
+def _roam_subject_id_from_path(p: str) -> str:
+    """
+    Extract 'sX' subject id from a ROAM filename like 's12_static_...csv'.
+    Falls back to the first underscore‑separated token of the basename.
+    """
+    base = os.path.basename(p)
+    root, _ = os.path.splitext(base)
+    return root.split("_", 1)[0].lower()
+
+
+def split_roam_subjects_subjectwise(
+    train_paths: Sequence[str],
+    val_patient_ids: Sequence[str],
+    labeled_prop: float,
+    seed: int = 42,
+):
+    """
+    Partition ROAM training CSVs at the **subject level** into labeled vs unlabeled.
+
+    Only subjects NOT in val_patient_ids are eligible. Public/EPN files
+    (if any were included in train_paths for other modes) remain labeled.
+
+    Returns
+    -------
+    labeled_paths : list[str]
+    unlabeled_paths : list[str]
+    labeled_subjects : list[str]
+    unlabeled_subjects : list[str]
+    """
+    if not (0.0 <= labeled_prop <= 1.0):
+        raise ValueError(f"labeled_prop must be in [0,1], got {labeled_prop}")
+
+    val_ids = {vid.lower() for vid in (val_patient_ids or [])}
+
+    subj_to_paths = {}
+    non_roam_paths = []
+    for p in train_paths:
+        sid = _roam_subject_id_from_path(p)
+        # Treat only sX patterns as ROAM; everything else is "non-ROAM"
+        if sid.startswith("s") and sid[1:].isdigit():
+            if sid in val_ids:
+                # Should not be present; skip if it is.
+                continue
+            subj_to_paths.setdefault(sid, []).append(p)
+        else:
+            non_roam_paths.append(p)
+
+    eligible_subjs = sorted(subj_to_paths.keys())
+    n = len(eligible_subjs)
+    if n == 0:
+        return sorted(train_paths), [], [], []
+
+    rng = random.Random(seed)
+    rng.shuffle(eligible_subjs)
+
+    # Round to nearest integer (keeps behavior stable across machines)
+    n_labeled = int(round(n * labeled_prop))
+    n_labeled = max(0, min(n, n_labeled))
+
+    labeled_set = set(eligible_subjs[:n_labeled])
+    unlabeled_set = set(eligible_subjs[n_labeled:])
+
+    labeled_paths = list(non_roam_paths)
+    unlabeled_paths = []
+    for sid, paths in subj_to_paths.items():
+        if sid in labeled_set:
+            labeled_paths.extend(paths)
+        else:
+            unlabeled_paths.extend(paths)
+
+    return (
+        sorted(labeled_paths),
+        sorted(unlabeled_paths),
+        sorted(labeled_set),
+        sorted(unlabeled_set),
+    )
+
+
 def get_csv_paths(
     dataset_selection,
     num_classes,
