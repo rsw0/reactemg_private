@@ -28,6 +28,13 @@ def load_emg_data(file_path):
     if file_path.suffix == '.npy':
         # Load numpy file
         data = np.load(file_path)
+        # For EPN dataset: column 0 is ground truth, columns 1-8 are EMG channels
+        # Extract only EMG channels (skip column 0 which is ground truth)
+        if data.ndim == 2 and data.shape[1] >= 2:
+            # Check if first column might be ground truth (typically has few unique values)
+            if len(np.unique(data[:, 0])) < 20:  # Heuristic: labels have few unique values
+                data = data[:, 1:]  # Skip first column (ground truth)
+
         # Transpose if needed (expecting C, T format)
         if data.shape[0] > data.shape[1]:
             data = data.T
