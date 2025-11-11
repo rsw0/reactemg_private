@@ -357,12 +357,12 @@ def compute_profile_from_window(X, fs):
 # DATA LOADING: ROAM Dataset Specific
 # ============================================================
 
-def load_and_filter_gesture_data_csv(file_path, target_label):
+def load_gesture_segments_csv(file_path, target_label, min_length=200):
     """
-    Load ROAM-EMG CSV file and filter by gesture label.
+    Load ROAM-EMG CSV file and extract individual gesture repetitions.
 
-    For open/close gestures, extracts only samples with the target label
-    to capture active gesture periods. For relax, uses all label=0 samples.
+    Instead of concatenating all repetitions, this extracts each continuous
+    segment separately. Each segment represents one gesture repetition (~5 seconds).
 
     Parameters
     ----------
@@ -370,11 +370,14 @@ def load_and_filter_gesture_data_csv(file_path, target_label):
         Path to ROAM-EMG CSV file
     target_label : int
         Gesture label (0=relax, 1=open, 2=close)
+    min_length : int
+        Minimum segment length in samples (default 200 = 1 second @ 200Hz)
 
     Returns
     -------
-    X : ndarray, shape (C, T) or None
-        Filtered EMG data (channels x time), or None if no valid samples
+    segments : list of ndarray
+        List of EMG segments, each shape (C, T)
+        Returns empty list if no valid segments found
     """
     df = pd.read_csv(file_path)
 
@@ -383,20 +386,40 @@ def load_and_filter_gesture_data_csv(file_path, target_label):
     emg_cols = [f'emg{i}' for i in range(8)]
     emg = df[emg_cols].values  # (T, 8)
 
-    # Filter by label
-    if target_label == 0:
-        mask = labels == 0  # All relax samples
+    # Find all indices with target label
+    indices = np.where(labels == target_label)[0]
+
+    if len(indices) == 0:
+        return []
+
+    # Find continuous segments (breaks where diff > 1)
+    breaks = np.where(np.diff(indices) > 1)[0]
+
+    # Extract all continuous segments
+    segments = []
+    if len(breaks) == 0:
+        # Only one continuous segment
+        segment_indices = indices
+        if len(segment_indices) >= min_length:
+            segment_emg = emg[segment_indices, :]  # (T, 8)
+            segments.append(segment_emg.T)  # Transpose to (8, T)
     else:
-        mask = labels == target_label  # Only active gesture samples
+        # Multiple segments
+        start_idx = 0
+        for break_idx in breaks:
+            segment_indices = indices[start_idx:break_idx+1]
+            if len(segment_indices) >= min_length:
+                segment_emg = emg[segment_indices, :]  # (T, 8)
+                segments.append(segment_emg.T)  # Transpose to (8, T)
+            start_idx = break_idx + 1
 
-    filtered_emg = emg[mask]
+        # Last segment
+        segment_indices = indices[start_idx:]
+        if len(segment_indices) >= min_length:
+            segment_emg = emg[segment_indices, :]  # (T, 8)
+            segments.append(segment_emg.T)  # Transpose to (8, T)
 
-    if len(filtered_emg) == 0:
-        return None
-
-    # Transpose to (C, T) as expected by coactivation functions
-    X = filtered_emg.T
-    return X
+    return segments
 
 
 # ============================================================
@@ -405,10 +428,15 @@ def load_and_filter_gesture_data_csv(file_path, target_label):
 
 def compute_subject_profiles(subject_dir):
     """
-    Compute relative strength profiles for one subject across all trials.
+    Compute relative strength profiles for one subject across all repetitions.
 
-    Aggregates relative strength vectors from multiple trials (different arm
-    postures) for each gesture using geometric mean (proper for compositional data).
+    PROPER AGGREGATION PROCEDURE:
+    1. For each file, extract individual gesture segments (repetitions)
+    2. Process each segment separately to get one relative strength vector
+    3. Aggregate all vectors using compositional_mean (geometric mean)
+
+    This properly treats each repetition as an independent measurement and
+    aggregates them using the theoretically correct method for compositional data.
 
     Parameters
     ----------
@@ -418,13 +446,12 @@ def compute_subject_profiles(subject_dir):
     Returns
     -------
     profiles : dict
-        {gesture_name: {'a': relative_strength, 'n_trials': int}}
+        {gesture_name: {'a': relative_strength, 'n_repetitions': int}}
     """
     subject_profiles = {}
 
     for label, gesture_name in GESTURES.items():
-        all_a = []
-        n_trials = 0
+        all_a = []  # Collect relative strength vectors from all repetitions
 
         # Find all files matching the patterns
         for pattern in FILE_PATTERNS:
@@ -432,28 +459,33 @@ def compute_subject_profiles(subject_dir):
 
             for file_path in files:
                 try:
-                    X = load_and_filter_gesture_data_csv(file_path, label)
+                    # Load individual gesture segments (NOT concatenated)
+                    segments = load_gesture_segments_csv(file_path, label)
 
-                    if X is None or X.shape[1] < 10:
+                    if len(segments) == 0:
                         continue
 
-                    # Compute relative strength profile
-                    _, _, _, a = compute_profile_from_window(X, FS)
+                    # Process each segment separately
+                    for segment in segments:
+                        # segment shape: (C, T)
+                        if segment.shape[1] < 200:  # Skip very short segments
+                            continue
 
-                    all_a.append(a)
-                    n_trials += 1
+                        # Compute relative strength for this repetition
+                        _, _, _, a = compute_profile_from_window(segment, FS)
+                        all_a.append(a)
 
                 except Exception as e:
                     print(f"Warning: Failed to process {file_path.name}: {e}")
                     continue
 
-        if n_trials > 0:
+        if len(all_a) > 0:
             # Aggregate using geometric mean (proper for compositional data)
-            a_agg = compositional_mean(all_a)
+            a_agg = compositional_mean(np.array(all_a))
 
             subject_profiles[gesture_name] = {
                 'a': a_agg,
-                'n_trials': n_trials
+                'n_repetitions': len(all_a)
             }
 
     return subject_profiles
@@ -800,7 +832,7 @@ def main():
     test_profiles = compute_subject_profiles(test_subject_dir)
 
     for gesture, data in test_profiles.items():
-        print(f"  {gesture}: {data['n_trials']} trials aggregated")
+        print(f"  {gesture}: {data['n_repetitions']} repetitions aggregated")
 
     # Plot and save single subject
     plot_relative_strength_profiles(
@@ -814,7 +846,7 @@ def main():
     save_dict = {}
     for gesture, data in test_profiles.items():
         save_dict[f"{gesture}_a"] = data['a']
-        save_dict[f"{gesture}_n_trials"] = data['n_trials']
+        save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
     np.savez(single_npz_path, **save_dict)
     print(f"Saved: {single_npz_path}")
     print()
@@ -840,7 +872,7 @@ def main():
         save_dict = {}
         for gesture, data in profiles.items():
             save_dict[f"{gesture}_a"] = data['a']
-            save_dict[f"{gesture}_n_trials"] = data['n_trials']
+            save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
 
         npz_path = OUTPUT_DIR / "per_subject_profiles" / f"{subject_name}_profiles.npz"
         np.savez(npz_path, **save_dict)
