@@ -13,7 +13,7 @@ Key Features:
 - Visualization: strength profiles and CLR compositional differences
 
 Typical Usage:
-    python roam_coactivation_kendall.py
+    python coactivation_analysis.py
 
 This will process all subjects in the ROAM-EMG dataset, compute relative strength
 profiles for relax/open/close gestures, and generate visualizations.
@@ -37,7 +37,7 @@ from scipy import signal
 DATA_ROOT = Path("/home/rsw1/Workspace/reactemg_private/data/ROAM_EMG")
 # Save outputs in the same directory as this script
 SCRIPT_DIR = Path(__file__).parent
-OUTPUT_DIR = SCRIPT_DIR / "coactivation_profiles_output_roam_kendall"
+OUTPUT_DIR = SCRIPT_DIR / "coactivation_profiles_output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 (OUTPUT_DIR / "per_subject_profiles").mkdir(exist_ok=True)
 (OUTPUT_DIR / "leave_one_out_analysis").mkdir(exist_ok=True)
@@ -782,7 +782,7 @@ def main():
     5. Generate visualizations
     """
     print("="*60)
-    print("ROAM-EMG COACTIVATION PROFILE COMPUTATION (KENDALL TAU)")
+    print("ROAM-EMG COACTIVATION PROFILE COMPUTATION")
     print("="*60)
     print()
 
