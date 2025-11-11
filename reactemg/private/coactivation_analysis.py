@@ -528,12 +528,12 @@ def plot_relative_strength_profiles(profiles, title_prefix, output_path):
     vmin_vec = 0.0
     vmax_vec = max([np.max(a) for a in all_vectors])
 
-    # ===== Relative Strength Vectors + CLR Compositional Differences =====
-    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+    # ===== 3 Rows: Relative Strength + CLR Differences + Fold-Changes =====
+    fig, axes = plt.subplots(3, 3, figsize=(18, 15))
 
     channels = np.arange(8)
 
-    # Plot base gestures (columns 0-2)
+    # ROW 0: Plot base gestures (relax, open, close)
     for idx, gesture in enumerate(gesture_list):
         if gesture in profiles:
             a = profiles[gesture]['a']
@@ -541,64 +541,112 @@ def plot_relative_strength_profiles(profiles, title_prefix, output_path):
             norm = plt.Normalize(vmin=vmin_vec, vmax=vmax_vec)
             colors = cmap(norm(a))
 
-            bars = axes[idx].bar(channels, a, color=colors, edgecolor='black', linewidth=1.2)
+            bars = axes[0, idx].bar(channels, a, color=colors, edgecolor='black', linewidth=1.2)
 
-            axes[idx].set_title(f"{gesture.capitalize()}", fontsize=14, fontweight='bold', pad=15)
-            axes[idx].set_xlabel("EMG Channel", fontsize=12)
-            axes[idx].set_ylabel("Relative Strength", fontsize=12)
-            axes[idx].set_xticks(channels)
-            axes[idx].set_ylim([vmin_vec, vmax_vec * 1.05])
-            axes[idx].grid(axis='y', alpha=0.3, linestyle='--')
-            axes[idx].set_axisbelow(True)
+            axes[0, idx].set_title(f"{gesture.capitalize()}", fontsize=14, fontweight='bold', pad=15)
+            axes[0, idx].set_xlabel("EMG Channel", fontsize=12)
+            axes[0, idx].set_ylabel("Relative Strength", fontsize=12)
+            axes[0, idx].set_xticks(channels)
+            axes[0, idx].set_ylim([vmin_vec, vmax_vec * 1.05])
+            axes[0, idx].grid(axis='y', alpha=0.3, linestyle='--')
+            axes[0, idx].set_axisbelow(True)
 
             for bar in bars:
                 height = bar.get_height()
-                axes[idx].text(bar.get_x() + bar.get_width()/2., height,
+                axes[0, idx].text(bar.get_x() + bar.get_width()/2., height,
                               f'{height:.3f}',
                               ha='center', va='bottom', fontsize=9, rotation=0)
 
-    # Compute CLR compositional differences (proper method for compositional data)
+    # Compute CLR compositional differences
     if all(g in profiles for g in ['relax', 'open', 'close']):
         comp_open_relax = compositional_compare(profiles['open']['a'], profiles['relax']['a'])
         comp_close_relax = compositional_compare(profiles['close']['a'], profiles['relax']['a'])
         clr_open_relax = comp_open_relax['clr_diff']
         clr_close_relax = comp_close_relax['clr_diff']
 
-        # Plot 4: CLR difference (open - relax)
+        # Exponentiate CLR differences to get fold-changes
+        fold_open_relax = np.exp(clr_open_relax)
+        fold_close_relax = np.exp(clr_close_relax)
+
+        # ROW 1: CLR differences
+        # Hide first column (aligned with relax)
+        axes[1, 0].axis('off')
+
+        # Plot 1.1: CLR difference (open - relax), aligned with "open"
         colors_clr_open = ['green' if x >= 0 else 'red' for x in clr_open_relax]
-        bars = axes[3].bar(channels, clr_open_relax, color=colors_clr_open,
+        bars = axes[1, 1].bar(channels, clr_open_relax, color=colors_clr_open,
                           edgecolor='black', linewidth=1.2, alpha=0.7)
-        axes[3].axhline(y=0, color='black', linestyle='-', linewidth=1)
-        axes[3].set_title("CLR: Open - Relax", fontsize=14, fontweight='bold', pad=15)
-        axes[3].set_xlabel("EMG Channel", fontsize=12)
-        axes[3].set_ylabel("CLR Difference", fontsize=12)
-        axes[3].set_xticks(channels)
-        axes[3].grid(axis='y', alpha=0.3, linestyle='--')
-        axes[3].set_axisbelow(True)
+        axes[1, 1].axhline(y=0, color='black', linestyle='-', linewidth=1)
+        axes[1, 1].set_title("CLR Difference: Open - Relax", fontsize=14, fontweight='bold', pad=15)
+        axes[1, 1].set_xlabel("EMG Channel", fontsize=12)
+        axes[1, 1].set_ylabel("CLR Difference", fontsize=12)
+        axes[1, 1].set_xticks(channels)
+        axes[1, 1].grid(axis='y', alpha=0.3, linestyle='--')
+        axes[1, 1].set_axisbelow(True)
 
         for bar, val in zip(bars, clr_open_relax):
             height = bar.get_height()
-            axes[3].text(bar.get_x() + bar.get_width()/2., height,
+            axes[1, 1].text(bar.get_x() + bar.get_width()/2., height,
                         f'{val:.2f}',
                         ha='center', va='bottom' if val >= 0 else 'top', fontsize=8)
 
-        # Plot 5: CLR difference (close - relax)
+        # Plot 1.2: CLR difference (close - relax), aligned with "close"
         colors_clr_close = ['green' if x >= 0 else 'red' for x in clr_close_relax]
-        bars = axes[4].bar(channels, clr_close_relax, color=colors_clr_close,
+        bars = axes[1, 2].bar(channels, clr_close_relax, color=colors_clr_close,
                           edgecolor='black', linewidth=1.2, alpha=0.7)
-        axes[4].axhline(y=0, color='black', linestyle='-', linewidth=1)
-        axes[4].set_title("CLR: Close - Relax", fontsize=14, fontweight='bold', pad=15)
-        axes[4].set_xlabel("EMG Channel", fontsize=12)
-        axes[4].set_ylabel("CLR Difference", fontsize=12)
-        axes[4].set_xticks(channels)
-        axes[4].grid(axis='y', alpha=0.3, linestyle='--')
-        axes[4].set_axisbelow(True)
+        axes[1, 2].axhline(y=0, color='black', linestyle='-', linewidth=1)
+        axes[1, 2].set_title("CLR Difference: Close - Relax", fontsize=14, fontweight='bold', pad=15)
+        axes[1, 2].set_xlabel("EMG Channel", fontsize=12)
+        axes[1, 2].set_ylabel("CLR Difference", fontsize=12)
+        axes[1, 2].set_xticks(channels)
+        axes[1, 2].grid(axis='y', alpha=0.3, linestyle='--')
+        axes[1, 2].set_axisbelow(True)
 
         for bar, val in zip(bars, clr_close_relax):
             height = bar.get_height()
-            axes[4].text(bar.get_x() + bar.get_width()/2., height,
+            axes[1, 2].text(bar.get_x() + bar.get_width()/2., height,
                         f'{val:.2f}',
                         ha='center', va='bottom' if val >= 0 else 'top', fontsize=8)
+
+        # ROW 2: Fold-changes
+        # Hide first column (aligned with relax)
+        axes[2, 0].axis('off')
+
+        # Plot 2.1: Fold-change (open / relax), aligned with "open"
+        colors_fold_open = ['green' if x >= 1.0 else 'red' for x in fold_open_relax]
+        bars = axes[2, 1].bar(channels, fold_open_relax, color=colors_fold_open,
+                          edgecolor='black', linewidth=1.2, alpha=0.7)
+        axes[2, 1].axhline(y=1.0, color='black', linestyle='-', linewidth=1)
+        axes[2, 1].set_title("Fold-Change: Open / Relax", fontsize=14, fontweight='bold', pad=15)
+        axes[2, 1].set_xlabel("EMG Channel", fontsize=12)
+        axes[2, 1].set_ylabel("Fold-Change (exp(CLR diff))", fontsize=12)
+        axes[2, 1].set_xticks(channels)
+        axes[2, 1].grid(axis='y', alpha=0.3, linestyle='--')
+        axes[2, 1].set_axisbelow(True)
+
+        for bar, val in zip(bars, fold_open_relax):
+            height = bar.get_height()
+            axes[2, 1].text(bar.get_x() + bar.get_width()/2., height,
+                        f'{val:.2f}x',
+                        ha='center', va='bottom' if val >= 1.0 else 'top', fontsize=8)
+
+        # Plot 2.2: Fold-change (close / relax), aligned with "close"
+        colors_fold_close = ['green' if x >= 1.0 else 'red' for x in fold_close_relax]
+        bars = axes[2, 2].bar(channels, fold_close_relax, color=colors_fold_close,
+                          edgecolor='black', linewidth=1.2, alpha=0.7)
+        axes[2, 2].axhline(y=1.0, color='black', linestyle='-', linewidth=1)
+        axes[2, 2].set_title("Fold-Change: Close / Relax", fontsize=14, fontweight='bold', pad=15)
+        axes[2, 2].set_xlabel("EMG Channel", fontsize=12)
+        axes[2, 2].set_ylabel("Fold-Change (exp(CLR diff))", fontsize=12)
+        axes[2, 2].set_xticks(channels)
+        axes[2, 2].grid(axis='y', alpha=0.3, linestyle='--')
+        axes[2, 2].set_axisbelow(True)
+
+        for bar, val in zip(bars, fold_close_relax):
+            height = bar.get_height()
+            axes[2, 2].text(bar.get_x() + bar.get_width()/2., height,
+                        f'{val:.2f}x',
+                        ha='center', va='bottom' if val >= 1.0 else 'top', fontsize=8)
 
     if "Population-Level" in title_prefix:
         suptitle = "Relative Strength & CLR Compositional Differences (ROAM)"
