@@ -13,7 +13,7 @@ Key Features:
 - Visualization: strength profiles and CLR compositional differences
 
 Typical Usage:
-    python coactivation_analysis.py
+    python coact_rs.py
 
 This will process all subjects in the ROAM-EMG dataset, compute relative strength
 profiles for relax/open/close gestures, and generate visualizations.
@@ -44,10 +44,23 @@ STROKE_PATIENT_DIRS = [
 
 # Save outputs in the same directory as this script
 SCRIPT_DIR = Path(__file__).parent
-OUTPUT_DIR = SCRIPT_DIR / "coactivation_profiles_output"
+OUTPUT_DIR = SCRIPT_DIR / "coact_rs_output"
 OUTPUT_DIR.mkdir(exist_ok=True)
-(OUTPUT_DIR / "per_subject_profiles").mkdir(exist_ok=True)
-(OUTPUT_DIR / "leave_one_out_analysis").mkdir(exist_ok=True)
+
+# Organized output structure: separate data and plots
+DATA_DIR = OUTPUT_DIR / "data"
+PLOTS_DIR = OUTPUT_DIR / "plots"
+DATA_DIR.mkdir(exist_ok=True)
+PLOTS_DIR.mkdir(exist_ok=True)
+
+# Create subdirectories for data
+(DATA_DIR / "per_subject").mkdir(exist_ok=True)
+(DATA_DIR / "leave_one_out").mkdir(exist_ok=True)
+(DATA_DIR / "stroke_patients").mkdir(exist_ok=True)
+
+# Create subdirectories for plots
+(PLOTS_DIR / "leave_one_out").mkdir(exist_ok=True)
+(PLOTS_DIR / "stroke_patients").mkdir(exist_ok=True)
 
 FS = 200.0  # Sampling rate for ROAM dataset (Hz)
 
@@ -903,15 +916,8 @@ def main():
     for gesture, data in test_profiles.items():
         print(f"  {gesture}: {data['n_repetitions']} repetitions aggregated")
 
-    # Plot and save single subject
-    plot_relative_strength_profiles(
-        test_profiles,
-        f"Single Subject ({test_subject_dir.name})",
-        OUTPUT_DIR / "single_subject_coactivation.png"
-    )
-
     # Save single subject profiles
-    single_npz_path = OUTPUT_DIR / f"single_subject_profiles_{test_subject_dir.name}.npz"
+    single_npz_path = DATA_DIR / f"single_subject_profiles_{test_subject_dir.name}.npz"
     save_dict = {}
     for gesture, data in test_profiles.items():
         save_dict[f"{gesture}_a"] = data['a']
@@ -943,7 +949,7 @@ def main():
             save_dict[f"{gesture}_a"] = data['a']
             save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
 
-        npz_path = OUTPUT_DIR / "per_subject_profiles" / f"{subject_name}_profiles.npz"
+        npz_path = DATA_DIR / "per_subject" / f"{subject_name}_profiles.npz"
         np.savez(npz_path, **save_dict)
 
     print()
@@ -975,7 +981,7 @@ def main():
         pop_save_dict[f"{gesture}_a"] = data['a']
         pop_save_dict[f"{gesture}_n_subjects"] = data['n_subjects']
 
-    pop_npz_path = OUTPUT_DIR / "population_profiles.npz"
+    pop_npz_path = DATA_DIR / "population_profiles.npz"
     np.savez(pop_npz_path, **pop_save_dict)
     print(f"Saved: {pop_npz_path}")
 
@@ -983,7 +989,7 @@ def main():
     plot_relative_strength_profiles(
         population_profiles,
         "Population-Level",
-        OUTPUT_DIR / "population_coactivation.png"
+        PLOTS_DIR / "population_coactivation.png"
     )
 
     print()
@@ -1010,7 +1016,7 @@ def main():
         loo_save_dict[f"{gesture}_a"] = data['a']
         loo_save_dict[f"{gesture}_n_subjects"] = data['n_subjects']
 
-    loo_npz_path = OUTPUT_DIR / "leave_one_out_analysis" / f"population_without_{loo_subject}.npz"
+    loo_npz_path = DATA_DIR / "leave_one_out" / f"population_without_{loo_subject}.npz"
     np.savez(loo_npz_path, **loo_save_dict)
     print(f"\nSaved: {loo_npz_path}")
 
@@ -1018,7 +1024,15 @@ def main():
     plot_relative_strength_profiles(
         population_profiles_loo,
         f"Population (LOO without {loo_subject})",
-        OUTPUT_DIR / "leave_one_out_analysis" / f"population_without_{loo_subject}_coactivation.png"
+        PLOTS_DIR / "leave_one_out" / f"population_without_{loo_subject}_coactivation.png"
+    )
+
+    # Also save full population plot in leave_one_out folder for easy comparison
+    print(f"\nSaving full population plot to leave_one_out folder for comparison...")
+    plot_relative_strength_profiles(
+        population_profiles,
+        "Population-Level (All Subjects)",
+        PLOTS_DIR / "leave_one_out" / "population_all_subjects_coactivation.png"
     )
 
     # Step 5: Subject vs Population Comparison (Per-Gesture)
@@ -1031,7 +1045,7 @@ def main():
     plot_relative_strength_profiles(
         all_subject_profiles[loo_subject],
         f"Subject {loo_subject}",
-        OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_coactivation.png"
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_coactivation.png"
     )
 
     # NEW: Per-gesture comparison plot (relax, open, close separately)
@@ -1040,7 +1054,7 @@ def main():
         all_subject_profiles[loo_subject],
         population_profiles_loo,
         loo_subject,
-        OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_vs_loo_per_gesture.png"
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_vs_loo_per_gesture.png"
     )
 
     # Step 6: Aitchison Distance Analysis
@@ -1051,13 +1065,17 @@ def main():
 
     # Compare held-out subject to leave-one-out population (PRIMARY comparison)
     print(f"\nComparing {loo_subject} to LOO population mean (excluding self)...")
-    distances_loo = compute_and_plot_aitchison_distances(
-        all_subject_profiles[loo_subject],
-        population_profiles_loo,
-        loo_subject,
-        OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_vs_loo_population_aitchison.png",
-        subtitle="LOO"
-    )
+
+    # Compute Aitchison distances (without redundant bar plot - distances already shown in comparison plots)
+    gesture_list = ["relax", "open", "close"]
+    distances_loo = {}
+    for gesture in gesture_list:
+        if gesture in all_subject_profiles[loo_subject] and gesture in population_profiles_loo:
+            comp_result = compositional_compare(
+                all_subject_profiles[loo_subject][gesture]['a'],
+                population_profiles_loo[gesture]['a']
+            )
+            distances_loo[gesture] = comp_result['aitchison_distance']
 
     print(f"\nAitchison Distances ({loo_subject} vs LOO Population):")
     for gesture, dist in distances_loo.items():
@@ -1071,7 +1089,7 @@ def main():
         "interpretation": "Distance of 0 means identical patterns. Higher values indicate more dissimilar muscle activation patterns."
     }
 
-    json_path = OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_aitchison_distances.json"
+    json_path = DATA_DIR / "leave_one_out" / f"{loo_subject}_aitchison_distances.json"
     with open(json_path, 'w') as f:
         json.dump(aitchison_results, f, indent=2)
     print(f"\nSaved Aitchison distances: {json_path}")
@@ -1080,9 +1098,6 @@ def main():
     print("\n" + "="*60)
     print("Step 7: Stroke Patient Analysis (vs Healthy Population)")
     print("="*60)
-
-    # Create output directory for stroke patients
-    (OUTPUT_DIR / "stroke_patients").mkdir(exist_ok=True)
 
     for stroke_dir in STROKE_PATIENT_DIRS:
         if not stroke_dir.exists() or not stroke_dir.is_dir():
@@ -1111,7 +1126,7 @@ def main():
                 stroke_save_dict[f"{gesture}_a"] = data['a']
                 stroke_save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
 
-            stroke_npz_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_profiles.npz"
+            stroke_npz_path = DATA_DIR / "stroke_patients" / f"{stroke_id}_profiles.npz"
             np.savez(stroke_npz_path, **stroke_save_dict)
             print(f"  Saved: {stroke_npz_path}")
 
@@ -1119,7 +1134,7 @@ def main():
             plot_relative_strength_profiles(
                 stroke_profiles,
                 f"Stroke Patient {stroke_id}",
-                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_coactivation.png"
+                PLOTS_DIR / "stroke_patients" / f"{stroke_id}_coactivation.png"
             )
 
             # Compare stroke patient to FULL healthy population (no LOO)
@@ -1128,17 +1143,18 @@ def main():
                 stroke_profiles,
                 population_profiles,  # Full healthy population
                 stroke_id,
-                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_per_gesture.png"
+                PLOTS_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_per_gesture.png"
             )
 
-            # Compute and plot Aitchison distances
-            distances_stroke = compute_and_plot_aitchison_distances(
-                stroke_profiles,
-                population_profiles,  # Full healthy population
-                stroke_id,
-                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_aitchison.png",
-                subtitle="Healthy Population"
-            )
+            # Compute Aitchison distances (without redundant bar plot - distances already shown in comparison plots)
+            distances_stroke = {}
+            for gesture in gesture_list:
+                if gesture in stroke_profiles and gesture in population_profiles:
+                    comp_result = compositional_compare(
+                        stroke_profiles[gesture]['a'],
+                        population_profiles[gesture]['a']
+                    )
+                    distances_stroke[gesture] = comp_result['aitchison_distance']
 
             print(f"\n  Aitchison Distances ({stroke_id} vs Healthy Population):")
             for gesture, dist in distances_stroke.items():
@@ -1151,7 +1167,7 @@ def main():
                 "interpretation": "Distance of 0 means identical patterns. Higher values indicate more dissimilar muscle activation patterns."
             }
 
-            stroke_json_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_aitchison_distances.json"
+            stroke_json_path = DATA_DIR / "stroke_patients" / f"{stroke_id}_aitchison_distances.json"
             with open(stroke_json_path, 'w') as f:
                 json.dump(stroke_aitchison_results, f, indent=2)
             print(f"  Saved Aitchison distances: {stroke_json_path}")
@@ -1167,8 +1183,8 @@ def main():
     print("COMPLETED SUCCESSFULLY")
     print("="*60)
     print(f"\nAll outputs saved to: {OUTPUT_DIR.absolute()}")
-    print(f"Leave-one-out analysis saved to: {(OUTPUT_DIR / 'leave_one_out_analysis').absolute()}")
-    print(f"Stroke patient analysis saved to: {(OUTPUT_DIR / 'stroke_patients').absolute()}")
+    print(f"  Data files (.npz, .json): {DATA_DIR.absolute()}")
+    print(f"  Plots (.png): {PLOTS_DIR.absolute()}")
 
 
 if __name__ == "__main__":

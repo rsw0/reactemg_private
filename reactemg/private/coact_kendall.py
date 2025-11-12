@@ -17,7 +17,7 @@ Differences from Relative Strength Analysis:
 - Kendall tau-b: (C x C) matrix - pairwise monotonic relationships (how muscles co-activate)
 
 Typical Usage:
-    python coactivation_kendall_analysis.py
+    python coact_kendall.py
 
 This will process all subjects in the ROAM-EMG dataset, compute Kendall tau-b
 co-activation maps for relax/open/close gestures, and generate visualizations.
@@ -51,10 +51,23 @@ STROKE_PATIENT_DIRS = [
 ]
 
 SCRIPT_DIR = Path(__file__).parent
-OUTPUT_DIR = SCRIPT_DIR / "coactivation_kendall_output"
+OUTPUT_DIR = SCRIPT_DIR / "coact_kendall_output"
 OUTPUT_DIR.mkdir(exist_ok=True)
-(OUTPUT_DIR / "per_subject_profiles").mkdir(exist_ok=True)
-(OUTPUT_DIR / "leave_one_out_analysis").mkdir(exist_ok=True)
+
+# Organized output structure: separate data and plots
+DATA_DIR = OUTPUT_DIR / "data"
+PLOTS_DIR = OUTPUT_DIR / "plots"
+DATA_DIR.mkdir(exist_ok=True)
+PLOTS_DIR.mkdir(exist_ok=True)
+
+# Create subdirectories for data
+(DATA_DIR / "per_subject").mkdir(exist_ok=True)
+(DATA_DIR / "leave_one_out").mkdir(exist_ok=True)
+(DATA_DIR / "stroke_patients").mkdir(exist_ok=True)
+
+# Create subdirectories for plots
+(PLOTS_DIR / "leave_one_out").mkdir(exist_ok=True)
+(PLOTS_DIR / "stroke_patients").mkdir(exist_ok=True)
 
 FS = 200.0  # Sampling rate for ROAM dataset (Hz)
 
@@ -1135,16 +1148,8 @@ def main():
         print(f"    Tau-b map shape: {data['tau'].shape}")
         print(f"    Tau-b range: [{data['tau'].min():.3f}, {data['tau'].max():.3f}]")
 
-    # Plot and save single subject
-    plot_gesture_tau_maps(
-        test_profiles,
-        f"Single Subject ({test_subject_dir.name})",
-        OUTPUT_DIR / "single_subject_kendall.png",
-        triangle_only=TRIANGLE_ONLY
-    )
-
     # Save single subject profiles
-    single_npz_path = OUTPUT_DIR / f"single_subject_kendall_{test_subject_dir.name}.npz"
+    single_npz_path = DATA_DIR / f"single_subject_kendall_{test_subject_dir.name}.npz"
     save_dict = {}
     for gesture, data in test_profiles.items():
         save_dict[f"{gesture}_tau"] = data['tau']
@@ -1176,7 +1181,7 @@ def main():
             save_dict[f"{gesture}_tau"] = data['tau']
             save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
 
-        npz_path = OUTPUT_DIR / "per_subject_profiles" / f"{subject_name}_kendall.npz"
+        npz_path = DATA_DIR / "per_subject" / f"{subject_name}_kendall.npz"
         np.savez(npz_path, **save_dict)
 
     print()
@@ -1209,7 +1214,7 @@ def main():
         pop_save_dict[f"{gesture}_tau"] = data['tau']
         pop_save_dict[f"{gesture}_n_subjects"] = data['n_subjects']
 
-    pop_npz_path = OUTPUT_DIR / "population_kendall.npz"
+    pop_npz_path = DATA_DIR / "population_kendall.npz"
     np.savez(pop_npz_path, **pop_save_dict)
     print(f"Saved: {pop_npz_path}")
 
@@ -1217,7 +1222,7 @@ def main():
     plot_gesture_tau_maps(
         population_profiles,
         "Population-Level",
-        OUTPUT_DIR / "population_kendall.png",
+        PLOTS_DIR / "population_kendall.png",
         triangle_only=TRIANGLE_ONLY
     )
 
@@ -1245,7 +1250,7 @@ def main():
         loo_save_dict[f"{gesture}_tau"] = data['tau']
         loo_save_dict[f"{gesture}_n_subjects"] = data['n_subjects']
 
-    loo_npz_path = OUTPUT_DIR / "leave_one_out_analysis" / f"population_without_{loo_subject}.npz"
+    loo_npz_path = DATA_DIR / "leave_one_out" / f"population_without_{loo_subject}.npz"
     np.savez(loo_npz_path, **loo_save_dict)
     print(f"\nSaved: {loo_npz_path}")
 
@@ -1253,7 +1258,16 @@ def main():
     plot_gesture_tau_maps(
         population_profiles_loo,
         f"Population (LOO without {loo_subject})",
-        OUTPUT_DIR / "leave_one_out_analysis" / f"population_without_{loo_subject}_kendall.png",
+        PLOTS_DIR / "leave_one_out" / f"population_without_{loo_subject}_kendall.png",
+        triangle_only=TRIANGLE_ONLY
+    )
+
+    # Also save full population plot in leave_one_out folder for easy comparison
+    print(f"\nSaving full population plot to leave_one_out folder for comparison...")
+    plot_gesture_tau_maps(
+        population_profiles,
+        "Population-Level (All Subjects)",
+        PLOTS_DIR / "leave_one_out" / "population_all_subjects_kendall.png",
         triangle_only=TRIANGLE_ONLY
     )
 
@@ -1267,7 +1281,7 @@ def main():
     plot_gesture_tau_maps(
         all_subject_profiles[loo_subject],
         f"Subject {loo_subject}",
-        OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_kendall.png",
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_kendall.png",
         triangle_only=TRIANGLE_ONLY
     )
 
@@ -1277,7 +1291,7 @@ def main():
         all_subject_profiles[loo_subject],
         population_profiles_loo,
         loo_subject,
-        OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_vs_loo_kendall.png",
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_vs_loo_kendall.png",
         triangle_only=TRIANGLE_ONLY
     )
 
@@ -1288,13 +1302,17 @@ def main():
 
     # Compare held-out subject to leave-one-out population
     print(f"\nComparing {loo_subject} to LOO population...")
-    similarities_loo = compute_and_plot_tau_similarities(
-        all_subject_profiles[loo_subject],
-        population_profiles_loo,
-        loo_subject,
-        OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_vs_loo_similarities.png",
-        subtitle="LOO"
-    )
+
+    # Compute similarities (without redundant bar plots - metrics already shown in comparison plots)
+    gesture_list = ["relax", "open", "close"]
+    similarities_loo = {}
+    for gesture in gesture_list:
+        if gesture in all_subject_profiles[loo_subject] and gesture in population_profiles_loo:
+            sim = tau_map_similarity(
+                all_subject_profiles[loo_subject][gesture]['tau'],
+                population_profiles_loo[gesture]['tau']
+            )
+            similarities_loo[gesture] = sim
 
     print(f"\nSimilarity Metrics ({loo_subject} vs LOO Population):")
     for gesture, metrics in similarities_loo.items():
@@ -1314,7 +1332,7 @@ def main():
         }
     }
 
-    json_path = OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_kendall_similarities.json"
+    json_path = DATA_DIR / "leave_one_out" / f"{loo_subject}_kendall_similarities.json"
     with open(json_path, 'w') as f:
         json.dump(similarity_results, f, indent=2, default=float)
     print(f"\nSaved similarity metrics: {json_path}")
@@ -1323,9 +1341,6 @@ def main():
     print("\n" + "="*60)
     print("Step 7: Stroke Patient Analysis (vs Healthy Population)")
     print("="*60)
-
-    # Create output directory for stroke patients
-    (OUTPUT_DIR / "stroke_patients").mkdir(exist_ok=True)
 
     for stroke_dir in STROKE_PATIENT_DIRS:
         if not stroke_dir.exists() or not stroke_dir.is_dir():
@@ -1355,7 +1370,7 @@ def main():
                 stroke_save_dict[f"{gesture}_tau"] = data['tau']
                 stroke_save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
 
-            stroke_npz_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_kendall.npz"
+            stroke_npz_path = DATA_DIR / "stroke_patients" / f"{stroke_id}_kendall.npz"
             np.savez(stroke_npz_path, **stroke_save_dict)
             print(f"  Saved: {stroke_npz_path}")
 
@@ -1363,7 +1378,7 @@ def main():
             plot_gesture_tau_maps(
                 stroke_profiles,
                 f"Stroke Patient {stroke_id}",
-                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_kendall.png",
+                PLOTS_DIR / "stroke_patients" / f"{stroke_id}_kendall.png",
                 triangle_only=TRIANGLE_ONLY
             )
 
@@ -1373,18 +1388,19 @@ def main():
                 stroke_profiles,
                 population_profiles,  # Full healthy population
                 stroke_id,
-                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_kendall.png",
+                PLOTS_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_kendall.png",
                 triangle_only=TRIANGLE_ONLY
             )
 
-            # Compute and plot similarity metrics
-            similarities_stroke = compute_and_plot_tau_similarities(
-                stroke_profiles,
-                population_profiles,  # Full healthy population
-                stroke_id,
-                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_similarities.png",
-                subtitle="Healthy Population"
-            )
+            # Compute similarity metrics (without redundant bar plots - metrics already shown in comparison plots)
+            similarities_stroke = {}
+            for gesture in gesture_list:
+                if gesture in stroke_profiles and gesture in population_profiles:
+                    sim = tau_map_similarity(
+                        stroke_profiles[gesture]['tau'],
+                        population_profiles[gesture]['tau']
+                    )
+                    similarities_stroke[gesture] = sim
 
             print(f"\n  Similarity Metrics ({stroke_id} vs Healthy Population):")
             for gesture, metrics in similarities_stroke.items():
@@ -1404,7 +1420,7 @@ def main():
                 }
             }
 
-            stroke_json_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_kendall_similarities.json"
+            stroke_json_path = DATA_DIR / "stroke_patients" / f"{stroke_id}_kendall_similarities.json"
             with open(stroke_json_path, 'w') as f:
                 json.dump(stroke_similarity_results, f, indent=2, default=float)
             print(f"  Saved similarity metrics: {stroke_json_path}")
@@ -1420,8 +1436,8 @@ def main():
     print("COMPLETED SUCCESSFULLY")
     print("="*60)
     print(f"\nAll outputs saved to: {OUTPUT_DIR.absolute()}")
-    print(f"Leave-one-out analysis saved to: {(OUTPUT_DIR / 'leave_one_out_analysis').absolute()}")
-    print(f"Stroke patient analysis saved to: {(OUTPUT_DIR / 'stroke_patients').absolute()}")
+    print(f"  Data files (.npz, .json): {DATA_DIR.absolute()}")
+    print(f"  Plots (.png): {PLOTS_DIR.absolute()}")
 
 
 if __name__ == "__main__":
