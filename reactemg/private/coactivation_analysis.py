@@ -64,6 +64,15 @@ FILE_PATTERNS = [
     "_static_resting.csv"
 ]
 
+# File patterns for stroke patients (subset of files to use)
+STROKE_FILE_PATTERNS = [
+    "_close_only.csv",
+    "_open_only.csv",
+    "_static_resting.csv",
+    "_static_hanging.csv",
+    "_static_unsupported.csv"
+]
+
 
 # ============================================================
 # EMG PREPROCESSING
@@ -433,7 +442,7 @@ def load_gesture_segments_csv(file_path, target_label, min_length=200):
 # PROFILE COMPUTATION: Subject & Population Level
 # ============================================================
 
-def compute_subject_profiles(subject_dir):
+def compute_subject_profiles(subject_dir, file_patterns=None):
     """
     Compute relative strength profiles for one subject across all repetitions.
 
@@ -449,19 +458,24 @@ def compute_subject_profiles(subject_dir):
     ----------
     subject_dir : Path
         Directory containing subject's CSV files
+    file_patterns : list of str, optional
+        File patterns to match. If None, uses FILE_PATTERNS (default for healthy subjects)
 
     Returns
     -------
     profiles : dict
         {gesture_name: {'a': relative_strength, 'n_repetitions': int}}
     """
+    if file_patterns is None:
+        file_patterns = FILE_PATTERNS
+
     subject_profiles = {}
 
     for label, gesture_name in GESTURES.items():
         all_a = []  # Collect relative strength vectors from all repetitions
 
         # Find all files matching the patterns
-        for pattern in FILE_PATTERNS:
+        for pattern in file_patterns:
             files = list(subject_dir.glob(f"*{pattern}"))
 
             for file_path in files:
@@ -1079,9 +1093,9 @@ def main():
         print(f"\nProcessing stroke patient: {stroke_id}")
         print("-" * 60)
 
-        # Compute profiles for stroke patient
+        # Compute profiles for stroke patient using specific file patterns
         try:
-            stroke_profiles = compute_subject_profiles(stroke_dir)
+            stroke_profiles = compute_subject_profiles(stroke_dir, file_patterns=STROKE_FILE_PATTERNS)
 
             if not stroke_profiles:
                 print(f"  Warning: No profiles computed for {stroke_id}")
