@@ -43,6 +43,13 @@ import json
 # =============================================================================
 
 DATA_ROOT = Path("/home/rsw1/Workspace/reactemg_private/data/ROAM_EMG")
+
+# Stroke patient directories (added for P4 and P15)
+STROKE_PATIENT_DIRS = [
+    Path("/home/rsw1/Workspace/reactemg_private/reactemg/private/2025_09_04_p4"),
+    Path("/home/rsw1/Workspace/reactemg_private/reactemg/private/2025_09_04_p15")
+]
+
 SCRIPT_DIR = Path(__file__).parent
 OUTPUT_DIR = SCRIPT_DIR / "coactivation_kendall_output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -611,7 +618,7 @@ def _add_wraparound(tau):
 
 
 def plot_kendall_tau_heatmap(tau, title, output_path, annotate=False, fmt='.2f',
-                             add_wraparound=True):
+                             triangle_only=True):
     """
     Plot a single Kendall tau-b co-activation heatmap.
 
@@ -627,33 +634,42 @@ def plot_kendall_tau_heatmap(tau, title, output_path, annotate=False, fmt='.2f',
         Whether to show values in cells
     fmt : str
         Format string for annotations
-    add_wraparound : bool
-        If True, duplicate channel 0 at position 8 for circular visualization
+    triangle_only : bool
+        If True, show only lower triangle (matrix is symmetric)
     """
     sns.set_style("white")
     sns.set_context("paper", font_scale=1.2)
 
     # Apply transformations
     tau_plot = tau.copy()
-
-    # Add wraparound if requested
-    if add_wraparound:
-        tau_plot = _add_wraparound(tau_plot)
-
     C_plot = tau_plot.shape[0]
 
     fig, ax = plt.subplots(1, 1, figsize=(10, 8))
 
-    # Create masked array with white diagonal
+    # Create masked array
     tau_masked = np.ma.array(tau_plot, mask=False)
+
+    # Mask diagonal
     np.fill_diagonal(tau_masked.mask, True)
 
-    # Use Red-White-Blue colormap for full range [-1, 1]
-    cmap = plt.cm.RdBu_r.copy()
-    cmap.set_bad(color='white')  # Diagonal will be white
+    # Mask upper triangle if requested
+    if triangle_only:
+        tau_masked.mask[np.triu_indices(C_plot, k=1)] = True
 
-    # Create heatmap with full range [-1, 1]
-    im = ax.imshow(tau_masked, cmap=cmap, vmin=-1, vmax=1,
+    # Compute dynamic color scale based on off-diagonal values
+    offdiag_values = tau_masked.compressed()  # Get non-masked values
+    if len(offdiag_values) > 0:
+        max_abs = np.max(np.abs(offdiag_values))
+        vmin, vmax = -max_abs, max_abs
+    else:
+        vmin, vmax = -1, 1
+
+    # Use diverging colormap
+    cmap = plt.cm.RdBu_r.copy()
+    cmap.set_bad(color='white')  # Masked values will be white
+
+    # Create heatmap with dynamic range
+    im = ax.imshow(tau_masked, cmap=cmap, vmin=vmin, vmax=vmax,
                    aspect='auto', interpolation='nearest')
 
     # Add colorbar
@@ -661,12 +677,7 @@ def plot_kendall_tau_heatmap(tau, title, output_path, annotate=False, fmt='.2f',
     cbar.set_label("Kendall's τ-b", rotation=270, labelpad=20, fontsize=12)
 
     # Set ticks and labels
-    if add_wraparound:
-        channels = list(range(8)) + [0]  # 0,1,2,3,4,5,6,7,0
-        channel_labels = [str(i) for i in channels]
-    else:
-        channels = np.arange(C_plot)
-        channel_labels = [f'{i}' for i in channels]
+    channel_labels = [str(i) for i in range(C_plot)]
 
     ax.set_xticks(np.arange(C_plot))
     ax.set_yticks(np.arange(C_plot))
@@ -678,11 +689,11 @@ def plot_kendall_tau_heatmap(tau, title, output_path, annotate=False, fmt='.2f',
     ax.set_yticks(np.arange(C_plot + 1) - 0.5, minor=True)
     ax.grid(which="minor", color="gray", linestyle='-', linewidth=0.5)
 
-    # Annotate with values if requested (skip diagonal)
+    # Annotate with values if requested (skip masked cells)
     if annotate:
         for i in range(C_plot):
             for j in range(C_plot):
-                if i != j:  # Skip diagonal
+                if not tau_masked.mask[i, j]:  # Only annotate non-masked cells
                     text = ax.text(j, i, f'{tau_plot[i, j]:{fmt}}',
                                  ha="center", va="center", color="black", fontsize=8)
 
@@ -698,7 +709,7 @@ def plot_kendall_tau_heatmap(tau, title, output_path, annotate=False, fmt='.2f',
     sns.reset_defaults()
 
 
-def plot_gesture_tau_maps(profiles, title_prefix, output_path, add_wraparound=True):
+def plot_gesture_tau_maps(profiles, title_prefix, output_path, triangle_only=True):
     """
     Visualize Kendall tau-b maps for all three gestures side-by-side.
 
@@ -710,8 +721,8 @@ def plot_gesture_tau_maps(profiles, title_prefix, output_path, add_wraparound=Tr
         Title prefix (e.g., "Subject s01" or "Population-Level")
     output_path : Path
         Path for saving the plot
-    add_wraparound : bool
-        If True, duplicate channel 0 at position 8 for circular visualization
+    triangle_only : bool
+        If True, show only lower triangle
     """
     sns.set_style("white")
     sns.set_context("paper", font_scale=1.1)
@@ -719,26 +730,40 @@ def plot_gesture_tau_maps(profiles, title_prefix, output_path, add_wraparound=Tr
     gesture_list = ["relax", "open", "close"]
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
 
+    # Compute global color scale across all gestures for consistency
+    all_offdiag_values = []
+    for gesture in gesture_list:
+        if gesture in profiles:
+            tau = profiles[gesture]['tau'].copy()
+            # Extract off-diagonal values (exclude diagonal)
+            mask = ~np.eye(tau.shape[0], dtype=bool)
+            all_offdiag_values.extend(tau[mask])
+
+    if len(all_offdiag_values) > 0:
+        max_abs = np.max(np.abs(all_offdiag_values))
+        vmin, vmax = -max_abs, max_abs
+    else:
+        vmin, vmax = -1, 1
+
     for idx, gesture in enumerate(gesture_list):
         if gesture in profiles:
             tau = profiles[gesture]['tau'].copy()
-
-            # Add wraparound if requested
-            if add_wraparound:
-                tau = _add_wraparound(tau)
-
             C_plot = tau.shape[0]
 
-            # Create masked array with white diagonal
+            # Create masked array
             tau_masked = np.ma.array(tau, mask=False)
             np.fill_diagonal(tau_masked.mask, True)
 
-            # Use Red-White-Blue colormap for full range [-1, 1]
-            cmap = plt.cm.RdBu_r.copy()
-            cmap.set_bad(color='white')  # Diagonal will be white
+            # Mask upper triangle if requested
+            if triangle_only:
+                tau_masked.mask[np.triu_indices(C_plot, k=1)] = True
 
-            # Create heatmap with full range [-1, 1]
-            im = axes[idx].imshow(tau_masked, cmap=cmap, vmin=-1, vmax=1,
+            # Use diverging colormap
+            cmap = plt.cm.RdBu_r.copy()
+            cmap.set_bad(color='white')
+
+            # Create heatmap with dynamic range
+            im = axes[idx].imshow(tau_masked, cmap=cmap, vmin=vmin, vmax=vmax,
                                  aspect='auto', interpolation='nearest')
 
             # Add colorbar
@@ -747,10 +772,7 @@ def plot_gesture_tau_maps(profiles, title_prefix, output_path, add_wraparound=Tr
                 cbar.set_label("Kendall's τ-b", rotation=270, labelpad=20, fontsize=11)
 
             # Set ticks and labels
-            if add_wraparound:
-                channel_labels = [str(i) for i in list(range(8)) + [0]]
-            else:
-                channel_labels = [str(i) for i in range(C_plot)]
+            channel_labels = [str(i) for i in range(C_plot)]
 
             axes[idx].set_xticks(np.arange(C_plot))
             axes[idx].set_yticks(np.arange(C_plot))
@@ -782,7 +804,7 @@ def plot_gesture_tau_maps(profiles, title_prefix, output_path, add_wraparound=Tr
 
 
 def plot_subject_vs_population_tau_maps(subject_profiles, population_profiles,
-                                        subject_name, output_path, add_wraparound=True):
+                                        subject_name, output_path, triangle_only=True):
     """
     Plot comparison of subject vs population tau-b maps for each gesture.
 
@@ -798,14 +820,29 @@ def plot_subject_vs_population_tau_maps(subject_profiles, population_profiles,
         Name of the subject
     output_path : Path
         Path for saving the plot
-    add_wraparound : bool
-        If True, duplicate channel 0 at position 8
+    triangle_only : bool
+        If True, show only lower triangle
     """
     sns.set_style("white")
     sns.set_context("paper", font_scale=1.0)
 
     gesture_list = ["relax", "open", "close"]
     fig, axes = plt.subplots(3, 2, figsize=(14, 18))
+
+    # Compute global color scale across all gestures and both subject/population for consistency
+    all_offdiag_values = []
+    for gesture in gesture_list:
+        if gesture in subject_profiles and gesture in population_profiles:
+            for tau in [subject_profiles[gesture]['tau'], population_profiles[gesture]['tau']]:
+                # Extract off-diagonal values (exclude diagonal)
+                mask = ~np.eye(tau.shape[0], dtype=bool)
+                all_offdiag_values.extend(tau[mask])
+
+    if len(all_offdiag_values) > 0:
+        max_abs = np.max(np.abs(all_offdiag_values))
+        vmin, vmax = -max_abs, max_abs
+    else:
+        vmin, vmax = -1, 1
 
     for row_idx, gesture in enumerate(gesture_list):
         if gesture in subject_profiles and gesture in population_profiles:
@@ -815,31 +852,31 @@ def plot_subject_vs_population_tau_maps(subject_profiles, population_profiles,
             # Compute similarity metrics (before transformation)
             sim = tau_map_similarity(tau_subject, tau_population)
 
-            # Add wraparound if requested
-            if add_wraparound:
-                tau_subject = _add_wraparound(tau_subject)
-                tau_population = _add_wraparound(tau_population)
-
             C_plot = tau_subject.shape[0]
 
-            # Create masked arrays with white diagonal
+            # Create masked arrays
             tau_subject_masked = np.ma.array(tau_subject, mask=False)
             tau_population_masked = np.ma.array(tau_population, mask=False)
             np.fill_diagonal(tau_subject_masked.mask, True)
             np.fill_diagonal(tau_population_masked.mask, True)
 
-            # Use Red-White-Blue colormap for full range [-1, 1]
+            # Mask upper triangle if requested
+            if triangle_only:
+                tau_subject_masked.mask[np.triu_indices(C_plot, k=1)] = True
+                tau_population_masked.mask[np.triu_indices(C_plot, k=1)] = True
+
+            # Use diverging colormap
             cmap = plt.cm.RdBu_r.copy()
             cmap.set_bad(color='white')
 
-            # Plot subject map with full range [-1, 1]
-            im1 = axes[row_idx, 0].imshow(tau_subject_masked, cmap=cmap, vmin=-1, vmax=1,
+            # Plot subject map with dynamic range
+            im1 = axes[row_idx, 0].imshow(tau_subject_masked, cmap=cmap, vmin=vmin, vmax=vmax,
                                          aspect='auto', interpolation='nearest')
             axes[row_idx, 0].set_title(f"{gesture.capitalize()} - {subject_name}",
                                       fontsize=12, fontweight='bold', pad=10)
 
-            # Plot population map with full range [-1, 1]
-            im2 = axes[row_idx, 1].imshow(tau_population_masked, cmap=cmap, vmin=-1, vmax=1,
+            # Plot population map with dynamic range
+            im2 = axes[row_idx, 1].imshow(tau_population_masked, cmap=cmap, vmin=vmin, vmax=vmax,
                                          aspect='auto', interpolation='nearest')
             axes[row_idx, 1].set_title(f"{gesture.capitalize()} - Population (LOO)\n" +
                                       f"Pearson(z): {sim['pearson_z']:.3f}, Fro: {sim['fro_z']:.3f}",
@@ -847,10 +884,7 @@ def plot_subject_vs_population_tau_maps(subject_profiles, population_profiles,
 
             # Set ticks and labels for both
             for col_idx in [0, 1]:
-                if add_wraparound:
-                    channel_labels = [str(i) for i in list(range(8)) + [0]]
-                else:
-                    channel_labels = [str(i) for i in range(C_plot)]
+                channel_labels = [str(i) for i in range(C_plot)]
 
                 axes[row_idx, col_idx].set_xticks(np.arange(C_plot))
                 axes[row_idx, col_idx].set_yticks(np.arange(C_plot))
@@ -1055,20 +1089,31 @@ def main():
     #   - Positive values: Co-activation (synergistic muscles)
     #   - Negative values: Anti-coactivation (antagonistic muscles, reciprocal inhibition)
     #
-    # Colormap: Red-White-Blue (negative=red, zero=white, positive=blue)
-    # Range: -1 to +1 (full range, preserves all information)
+    # TRIANGLE_ONLY: Show only lower triangle (matrix is symmetric)
     #
-    ADD_WRAPAROUND = True  # Duplicate channel 0 at position 8 (circular electrode array)
+    TRIANGLE_ONLY = True   # Show only lower triangle (reduces redundancy)
     # =============================================================================
 
-    print("Visualization: Full range [-1, 1] with Red-White-Blue colormap")
-    print(f"Wraparound: {'ON' if ADD_WRAPAROUND else 'OFF'} (channel 0 duplicated at position 8)")
+    print("Visualization settings:")
+    print("  - Values: Signed τ (preserves positive/negative)")
+    print("  - Colormap: Diverging Red-White-Blue")
+    print("  - Range: [-max_abs, +max_abs] (dynamic)")
+    print("  - Note: Red=negative, White=zero, Blue=positive")
+    print(f"  - Triangle: {'Lower only' if TRIANGLE_ONLY else 'Full matrix'}")
+    print("  - Diagonal: White (self-correlations masked)")
     print()
 
-    # Get all subject directories
+    # Get all subject directories (ROAM healthy subjects)
     subject_dirs = sorted([d for d in DATA_ROOT.iterdir()
                           if d.is_dir() and d.name.startswith('s')])
-    print(f"Found {len(subject_dirs)} subjects")
+
+    # Add stroke patient directories
+    for stroke_dir in STROKE_PATIENT_DIRS:
+        if stroke_dir.exists() and stroke_dir.is_dir():
+            subject_dirs.append(stroke_dir)
+            print(f"Added stroke patient: {stroke_dir.name}")
+
+    print(f"Found {len(subject_dirs)} subjects (including stroke patients)")
     print()
 
     # Step 1: Test on single subject
@@ -1088,7 +1133,7 @@ def main():
         test_profiles,
         f"Single Subject ({test_subject_dir.name})",
         OUTPUT_DIR / "single_subject_kendall.png",
-        add_wraparound=ADD_WRAPAROUND
+        triangle_only=TRIANGLE_ONLY
     )
 
     # Save single subject profiles
@@ -1166,7 +1211,7 @@ def main():
         population_profiles,
         "Population-Level",
         OUTPUT_DIR / "population_kendall.png",
-        add_wraparound=ADD_WRAPAROUND
+        triangle_only=TRIANGLE_ONLY
     )
 
     print()
@@ -1202,7 +1247,7 @@ def main():
         population_profiles_loo,
         f"Population (LOO without {loo_subject})",
         OUTPUT_DIR / "leave_one_out_analysis" / f"population_without_{loo_subject}_kendall.png",
-        add_wraparound=ADD_WRAPAROUND
+        triangle_only=TRIANGLE_ONLY
     )
 
     # Step 5: Subject vs Population Comparison
@@ -1216,7 +1261,7 @@ def main():
         all_subject_profiles[loo_subject],
         f"Subject {loo_subject}",
         OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_kendall.png",
-        add_wraparound=ADD_WRAPAROUND
+        triangle_only=TRIANGLE_ONLY
     )
 
     # Side-by-side comparison plot
@@ -1226,7 +1271,7 @@ def main():
         population_profiles_loo,
         loo_subject,
         OUTPUT_DIR / "leave_one_out_analysis" / f"{loo_subject}_vs_loo_kendall.png",
-        add_wraparound=ADD_WRAPAROUND
+        triangle_only=TRIANGLE_ONLY
     )
 
     # Step 6: Similarity Analysis

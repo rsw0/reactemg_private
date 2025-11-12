@@ -35,6 +35,13 @@ from scipy import signal
 # ============================================================
 
 DATA_ROOT = Path("/home/rsw1/Workspace/reactemg_private/data/ROAM_EMG")
+
+# Stroke patient directories (added for P4 and P15)
+STROKE_PATIENT_DIRS = [
+    Path("/home/rsw1/Workspace/reactemg_private/reactemg/private/2025_09_04_p4"),
+    Path("/home/rsw1/Workspace/reactemg_private/reactemg/private/2025_09_04_p15")
+]
+
 # Save outputs in the same directory as this script
 SCRIPT_DIR = Path(__file__).parent
 OUTPUT_DIR = SCRIPT_DIR / "coactivation_profiles_output"
@@ -866,10 +873,17 @@ def main():
     print("="*60)
     print()
 
-    # Get all subject directories
+    # Get all subject directories (ROAM healthy subjects)
     subject_dirs = sorted([d for d in DATA_ROOT.iterdir()
                           if d.is_dir() and d.name.startswith('s')])
-    print(f"Found {len(subject_dirs)} subjects")
+
+    # Add stroke patient directories
+    for stroke_dir in STROKE_PATIENT_DIRS:
+        if stroke_dir.exists() and stroke_dir.is_dir():
+            subject_dirs.append(stroke_dir)
+            print(f"Added stroke patient: {stroke_dir.name}")
+
+    print(f"Found {len(subject_dirs)} subjects (including stroke patients)")
     print()
 
     # Step 1: Test on single subject
