@@ -873,17 +873,10 @@ def main():
     print("="*60)
     print()
 
-    # Get all subject directories (ROAM healthy subjects)
+    # Get all subject directories (ROAM healthy subjects ONLY)
     subject_dirs = sorted([d for d in DATA_ROOT.iterdir()
                           if d.is_dir() and d.name.startswith('s')])
-
-    # Add stroke patient directories
-    for stroke_dir in STROKE_PATIENT_DIRS:
-        if stroke_dir.exists() and stroke_dir.is_dir():
-            subject_dirs.append(stroke_dir)
-            print(f"Added stroke patient: {stroke_dir.name}")
-
-    print(f"Found {len(subject_dirs)} subjects (including stroke patients)")
+    print(f"Found {len(subject_dirs)} healthy subjects")
     print()
 
     # Step 1: Test on single subject
@@ -1069,12 +1062,99 @@ def main():
         json.dump(aitchison_results, f, indent=2)
     print(f"\nSaved Aitchison distances: {json_path}")
 
+    # Step 7: Stroke Patient Analysis (P4 and P15 vs Healthy Population)
+    print("\n" + "="*60)
+    print("Step 7: Stroke Patient Analysis (vs Healthy Population)")
+    print("="*60)
+
+    # Create output directory for stroke patients
+    (OUTPUT_DIR / "stroke_patients").mkdir(exist_ok=True)
+
+    for stroke_dir in STROKE_PATIENT_DIRS:
+        if not stroke_dir.exists() or not stroke_dir.is_dir():
+            print(f"\nWarning: Stroke patient directory not found: {stroke_dir}")
+            continue
+
+        stroke_id = stroke_dir.name  # e.g., "2025_09_04_p4"
+        print(f"\nProcessing stroke patient: {stroke_id}")
+        print("-" * 60)
+
+        # Compute profiles for stroke patient
+        try:
+            stroke_profiles = compute_subject_profiles(stroke_dir)
+
+            if not stroke_profiles:
+                print(f"  Warning: No profiles computed for {stroke_id}")
+                continue
+
+            print(f"  Successfully computed profiles for {stroke_id}")
+            for gesture, data in stroke_profiles.items():
+                print(f"    {gesture}: {data['n_repetitions']} repetitions")
+
+            # Save stroke patient profiles
+            stroke_save_dict = {}
+            for gesture, data in stroke_profiles.items():
+                stroke_save_dict[f"{gesture}_a"] = data['a']
+                stroke_save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
+
+            stroke_npz_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_profiles.npz"
+            np.savez(stroke_npz_path, **stroke_save_dict)
+            print(f"  Saved: {stroke_npz_path}")
+
+            # Plot stroke patient profiles
+            plot_relative_strength_profiles(
+                stroke_profiles,
+                f"Stroke Patient {stroke_id}",
+                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_coactivation.png"
+            )
+
+            # Compare stroke patient to FULL healthy population (no LOO)
+            print(f"\n  Comparing {stroke_id} to healthy population...")
+            plot_subject_vs_population_per_gesture(
+                stroke_profiles,
+                population_profiles,  # Full healthy population
+                stroke_id,
+                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_per_gesture.png"
+            )
+
+            # Compute and plot Aitchison distances
+            distances_stroke = compute_and_plot_aitchison_distances(
+                stroke_profiles,
+                population_profiles,  # Full healthy population
+                stroke_id,
+                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_aitchison.png",
+                subtitle="Healthy Population"
+            )
+
+            print(f"\n  Aitchison Distances ({stroke_id} vs Healthy Population):")
+            for gesture, dist in distances_stroke.items():
+                print(f"    {gesture}: {dist:.6f}")
+
+            # Save Aitchison distances to JSON
+            stroke_aitchison_results = {
+                "stroke_patient": stroke_id,
+                "vs_healthy_population": distances_stroke,
+                "interpretation": "Distance of 0 means identical patterns. Higher values indicate more dissimilar muscle activation patterns."
+            }
+
+            stroke_json_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_aitchison_distances.json"
+            with open(stroke_json_path, 'w') as f:
+                json.dump(stroke_aitchison_results, f, indent=2)
+            print(f"  Saved Aitchison distances: {stroke_json_path}")
+
+        except Exception as e:
+            print(f"  Error processing {stroke_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
     print()
     print("="*60)
     print("COMPLETED SUCCESSFULLY")
     print("="*60)
     print(f"\nAll outputs saved to: {OUTPUT_DIR.absolute()}")
     print(f"Leave-one-out analysis saved to: {(OUTPUT_DIR / 'leave_one_out_analysis').absolute()}")
+    print(f"Stroke patient analysis saved to: {(OUTPUT_DIR / 'stroke_patients').absolute()}")
 
 
 if __name__ == "__main__":

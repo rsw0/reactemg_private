@@ -1103,17 +1103,10 @@ def main():
     print("  - Diagonal: White (self-correlations masked)")
     print()
 
-    # Get all subject directories (ROAM healthy subjects)
+    # Get all subject directories (ROAM healthy subjects ONLY)
     subject_dirs = sorted([d for d in DATA_ROOT.iterdir()
                           if d.is_dir() and d.name.startswith('s')])
-
-    # Add stroke patient directories
-    for stroke_dir in STROKE_PATIENT_DIRS:
-        if stroke_dir.exists() and stroke_dir.is_dir():
-            subject_dirs.append(stroke_dir)
-            print(f"Added stroke patient: {stroke_dir.name}")
-
-    print(f"Found {len(subject_dirs)} subjects (including stroke patients)")
+    print(f"Found {len(subject_dirs)} healthy subjects")
     print()
 
     # Step 1: Test on single subject
@@ -1312,12 +1305,109 @@ def main():
         json.dump(similarity_results, f, indent=2, default=float)
     print(f"\nSaved similarity metrics: {json_path}")
 
+    # Step 7: Stroke Patient Analysis (P4 and P15 vs Healthy Population)
+    print("\n" + "="*60)
+    print("Step 7: Stroke Patient Analysis (vs Healthy Population)")
+    print("="*60)
+
+    # Create output directory for stroke patients
+    (OUTPUT_DIR / "stroke_patients").mkdir(exist_ok=True)
+
+    for stroke_dir in STROKE_PATIENT_DIRS:
+        if not stroke_dir.exists() or not stroke_dir.is_dir():
+            print(f"\nWarning: Stroke patient directory not found: {stroke_dir}")
+            continue
+
+        stroke_id = stroke_dir.name  # e.g., "2025_09_04_p4"
+        print(f"\nProcessing stroke patient: {stroke_id}")
+        print("-" * 60)
+
+        # Compute Kendall profiles for stroke patient
+        try:
+            stroke_profiles = compute_subject_kendall_profiles(stroke_dir)
+
+            if not stroke_profiles:
+                print(f"  Warning: No profiles computed for {stroke_id}")
+                continue
+
+            print(f"  Successfully computed Kendall profiles for {stroke_id}")
+            for gesture, data in stroke_profiles.items():
+                print(f"    {gesture}: {data['n_repetitions']} repetitions")
+                print(f"      Tau-b range: [{data['tau'].min():.3f}, {data['tau'].max():.3f}]")
+
+            # Save stroke patient profiles
+            stroke_save_dict = {}
+            for gesture, data in stroke_profiles.items():
+                stroke_save_dict[f"{gesture}_tau"] = data['tau']
+                stroke_save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
+
+            stroke_npz_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_kendall.npz"
+            np.savez(stroke_npz_path, **stroke_save_dict)
+            print(f"  Saved: {stroke_npz_path}")
+
+            # Plot stroke patient Kendall maps
+            plot_gesture_tau_maps(
+                stroke_profiles,
+                f"Stroke Patient {stroke_id}",
+                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_kendall.png",
+                triangle_only=TRIANGLE_ONLY
+            )
+
+            # Compare stroke patient to FULL healthy population (no LOO)
+            print(f"\n  Comparing {stroke_id} to healthy population...")
+            plot_subject_vs_population_tau_maps(
+                stroke_profiles,
+                population_profiles,  # Full healthy population
+                stroke_id,
+                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_kendall.png",
+                triangle_only=TRIANGLE_ONLY
+            )
+
+            # Compute and plot similarity metrics
+            similarities_stroke = compute_and_plot_tau_similarities(
+                stroke_profiles,
+                population_profiles,  # Full healthy population
+                stroke_id,
+                OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_vs_healthy_population_similarities.png",
+                subtitle="Healthy Population"
+            )
+
+            print(f"\n  Similarity Metrics ({stroke_id} vs Healthy Population):")
+            for gesture, metrics in similarities_stroke.items():
+                print(f"    {gesture}:")
+                print(f"      Pearson (z-space): {metrics['pearson_z']:.4f}")
+                print(f"      Frobenius dist (z): {metrics['fro_z']:.4f}")
+                print(f"      Cosine similarity: {metrics['cosine_z']:.4f}")
+
+            # Save similarity metrics to JSON
+            stroke_similarity_results = {
+                "stroke_patient": stroke_id,
+                "vs_healthy_population": similarities_stroke,
+                "interpretation": {
+                    "pearson_z": "Correlation in Fisher z-space. Range [-1,1]. Higher = more similar pattern.",
+                    "fro_z": "Frobenius distance in z-space. Lower = more similar. 0 = identical.",
+                    "cosine_z": "Cosine similarity in z-space. Range [0,1]. 1 = identical direction."
+                }
+            }
+
+            stroke_json_path = OUTPUT_DIR / "stroke_patients" / f"{stroke_id}_kendall_similarities.json"
+            with open(stroke_json_path, 'w') as f:
+                json.dump(stroke_similarity_results, f, indent=2, default=float)
+            print(f"  Saved similarity metrics: {stroke_json_path}")
+
+        except Exception as e:
+            print(f"  Error processing {stroke_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
     print()
     print("="*60)
     print("COMPLETED SUCCESSFULLY")
     print("="*60)
     print(f"\nAll outputs saved to: {OUTPUT_DIR.absolute()}")
     print(f"Leave-one-out analysis saved to: {(OUTPUT_DIR / 'leave_one_out_analysis').absolute()}")
+    print(f"Stroke patient analysis saved to: {(OUTPUT_DIR / 'stroke_patients').absolute()}")
 
 
 if __name__ == "__main__":
