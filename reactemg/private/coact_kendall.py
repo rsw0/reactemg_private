@@ -239,8 +239,105 @@ def kendall_tau_b_map_from_raw(
 
 
 # =============================================================================
-# (4) Aggregation of Kendall maps across repetitions and across subjects
-#      (geometry-aware)
+# (4a) SIMPLE τ-SPACE AGGREGATORS (no latent ρ, no Fisher z)
+# =============================================================================
+
+def _symmetrize_and_set_diag(M: np.ndarray, diag_value: float = 1.0) -> np.ndarray:
+    """Symmetrize and set diagonal."""
+    M = 0.5 * (M + M.T)
+    np.fill_diagonal(M, diag_value)
+    return M
+
+def _weighted_mean_tau(stack: np.ndarray, weights: Optional[Sequence[float]]) -> np.ndarray:
+    """
+    Weighted mean along axis=0 for shape (N, C, C).
+    Diagonal values are not aggregated (they're always 1.0).
+    weights=None -> simple mean.
+    """
+    if weights is None:
+        M = np.mean(stack, axis=0)
+    else:
+        w = np.asarray(weights, dtype=float).reshape(-1, 1, 1)
+        M = np.sum(w * stack, axis=0) / np.sum(w)
+    return M
+
+def aggregate_kendall_maps_tau_simple(
+    tau_maps: Sequence[np.ndarray],
+    weights: Optional[Sequence[float]] = None,
+    method: str = "median",          # "mean" | "median" | "trimmed"
+    trim_frac: float = 0.1,          # only used for method="trimmed"
+    clip: bool = True
+) -> np.ndarray:
+    """
+    Elementwise pooling in τ-space (bounded in [-1, 1]).
+    - mean:    arithmetic mean (optionally length-weighted)
+    - median:  robust center (ignores weights)
+    - trimmed: drop trim_frac from each tail, then mean (ignores weights)
+
+    Notes:
+      * Diagonals are not aggregated (they're always 1.0) and are set to 1.0 at the end.
+      * τ is bounded/non-additive; these are descriptive aggregators. Prefer 'median' if unsure.
+    """
+    assert len(tau_maps) > 0, "Need at least one map to aggregate"
+    C = tau_maps[0].shape[0]
+    stack = []
+    for Tm in tau_maps:
+        Tm = np.array(Tm, dtype=float, copy=True)
+        assert Tm.shape == (C, C), "All τ maps must have the same shape"
+        stack.append(Tm)
+    stack = np.stack(stack, axis=0)  # (N, C, C)
+
+    if method == "mean":
+        M = _weighted_mean_tau(stack, weights)
+    elif method == "median":
+        # Weighted median is non-trivial; we use unweighted elementwise median.
+        M = np.median(stack, axis=0)
+    elif method == "trimmed":
+        # Unweighted symmetric trimming along axis=0
+        k = int(np.floor(trim_frac * stack.shape[0]))
+        S = np.sort(stack, axis=0)
+        if k > 0:
+            S = S[k:-k, ...] if S.shape[0] - 2*k > 0 else S  # avoid empty
+        M = np.mean(S, axis=0)
+    else:
+        raise ValueError("method must be one of {'mean','median','trimmed'}")
+
+    # Clip to valid τ range if requested, restore diag=1, and symmetrize
+    if clip:
+        M = np.clip(M, -1.0, 1.0)
+    M = _symmetrize_and_set_diag(M, diag_value=1.0)
+    return M
+
+# Convenience wrappers mirroring the existing API
+def aggregate_repetitions_to_subject_simple(
+    repetition_tau_maps: Sequence[np.ndarray],
+    repetition_lengths: Optional[Sequence[int]] = None,
+    method: str = "median",
+    trim_frac: float = 0.1,
+) -> np.ndarray:
+    """Pool repetitions for ONE subject + gesture directly in τ-space."""
+    # Only 'mean' uses weights; 'median' and 'trimmed' ignore weights by design.
+    w = repetition_lengths if method == "mean" else None
+    return aggregate_kendall_maps_tau_simple(
+        repetition_tau_maps, weights=w, method=method, trim_frac=trim_frac
+    )
+
+def aggregate_subjects_to_population_simple(
+    subject_tau_maps: Sequence[np.ndarray],
+    subject_weights: Optional[Sequence[float]] = None,
+    method: str = "median",
+    trim_frac: float = 0.1,
+) -> np.ndarray:
+    """Pool subject-level maps (same gesture) directly in τ-space."""
+    w = subject_weights if method == "mean" else None
+    return aggregate_kendall_maps_tau_simple(
+        subject_tau_maps, weights=w, method=method, trim_frac=trim_frac
+    )
+
+
+# =============================================================================
+# (4b) Aggregation of Kendall maps across repetitions and across subjects
+#      (geometry-aware: Gaussian copula + Fisher z)
 # =============================================================================
 
 def _tau_to_rho_gaussian_copula(tau: np.ndarray) -> np.ndarray:
@@ -264,15 +361,22 @@ def _fisher_z_mean(rho_list: Sequence[np.ndarray], weights: Optional[Sequence[fl
     Works elementwise on square matrices of identical shape.
 
     We clip rho to (-1+eps, 1-eps) to avoid atanh blowups.
-    Diagonals should be handled by the caller (set to NaN and restored later).
+    Diagonal elements (which are 1.0) are preserved and not transformed.
     """
+    C = rho_list[0].shape[0]
+
+    # Apply Fisher z-transform, clipping to avoid atanh(±1) = ±inf
     Zs = [np.arctanh(np.clip(r, -1.0 + eps, 1.0 - eps)) for r in rho_list]
     Zs = np.stack(Zs, axis=0)  # (N, C, C)
+
+    # Aggregate
     if weights is None:
-        Zbar = np.nanmean(Zs, axis=0)
+        Zbar = np.mean(Zs, axis=0)
     else:
         w = np.asarray(weights, dtype=np.float64).reshape(-1, 1, 1)
-        Zbar = np.nansum(w * Zs, axis=0) / np.maximum(np.nansum(w, axis=0), eps)
+        Zbar = np.sum(w * Zs, axis=0) / np.sum(w)
+
+    # Transform back to rho space
     return np.tanh(Zbar)
 
 
@@ -304,23 +408,26 @@ def aggregate_kendall_maps(
     tau_agg : (C, C) aggregated tau-b
 
     Implementation detail:
-      - Diagonal entries (self-edges) are set back to 1.0 after aggregation.
+      - Diagonal entries (self-edges) are set to 1.0 after aggregation.
+      - The clipping in Fisher z-transform handles diagonal values (rho=1) safely.
     """
     assert len(tau_maps) > 0, "Need at least one map to aggregate"
     C = tau_maps[0].shape[0]
-    # Mask diagonal to avoid atanh(inf) via rho=1
     tau_stack = [np.array(t, dtype=np.float64) for t in tau_maps]
     for t in tau_stack:
         assert t.shape == (C, C), "All tau maps must have same shape"
-        np.fill_diagonal(t, np.nan)
 
+    # Convert tau -> rho via Gaussian copula
     rhos = [_tau_to_rho_gaussian_copula(t) for t in tau_stack]
+
+    # Fisher z-average in rho space (clipping handles diagonal safely)
     rho_agg = _fisher_z_mean(rhos, weights=weights, eps=eps)
+
+    # Convert back: rho -> tau
     tau_agg = _rho_to_tau_gaussian_copula(rho_agg)
 
-    # Restore diagonals
+    # Restore diagonals to exactly 1.0 and symmetrize
     np.fill_diagonal(tau_agg, 1.0)
-    # Symmetrize (guarding against tiny asymmetries from NaNs/weights)
     tau_agg = 0.5 * (tau_agg + tau_agg.T)
     return tau_agg
 
@@ -606,6 +713,77 @@ def compute_subject_kendall_profiles(subject_dir, file_patterns=None):
     return subject_profiles
 
 
+def compute_subject_kendall_profiles_simple(subject_dir, file_patterns=None, method="median"):
+    """
+    Compute Kendall tau-b co-activation maps using SIMPLE τ-space aggregation.
+
+    This version uses direct elementwise aggregation in τ-space (median, mean, or trimmed mean)
+    instead of the Gaussian copula + Fisher z transform.
+
+    Parameters
+    ----------
+    subject_dir : Path
+        Directory containing subject's CSV files
+    file_patterns : list of str, optional
+        File patterns to match. If None, uses FILE_PATTERNS (default for healthy subjects)
+    method : str
+        Aggregation method: "median" (default), "mean", or "trimmed"
+
+    Returns
+    -------
+    profiles : dict
+        {gesture_name: {'tau': tau_b_matrix (C,C), 'n_repetitions': int}}
+    """
+    if file_patterns is None:
+        file_patterns = FILE_PATTERNS
+
+    subject_profiles = {}
+
+    for label, gesture_name in GESTURES.items():
+        all_tau_maps = []  # Collect tau-b maps from all repetitions
+        all_lengths = []   # Track length of each repetition for weighting
+
+        # Find all files matching the patterns
+        for pattern in file_patterns:
+            files = list(subject_dir.glob(f"*{pattern}"))
+
+            for file_path in files:
+                try:
+                    # Load individual gesture segments (NOT concatenated)
+                    segments = load_gesture_segments_csv(file_path, label)
+
+                    if len(segments) == 0:
+                        continue
+
+                    # Process each segment separately
+                    for segment in segments:
+                        # segment shape: (C, T)
+                        if segment.shape[1] < 200:  # Skip very short segments
+                            continue
+
+                        # Compute Kendall tau-b map for this repetition
+                        tau, _ = kendall_tau_b_map_from_raw(segment, FS)
+                        all_tau_maps.append(tau)
+                        all_lengths.append(segment.shape[1])  # T samples
+
+                except Exception as e:
+                    print(f"Warning: Failed to process {file_path.name}: {e}")
+                    continue
+
+        if len(all_tau_maps) > 0:
+            # Aggregate using SIMPLE τ-space method
+            tau_agg = aggregate_repetitions_to_subject_simple(
+                all_tau_maps, all_lengths, method=method
+            )
+
+            subject_profiles[gesture_name] = {
+                'tau': tau_agg,
+                'n_repetitions': len(all_tau_maps)
+            }
+
+    return subject_profiles
+
+
 # =============================================================================
 # VISUALIZATION: Plotting Functions
 # =============================================================================
@@ -811,6 +989,17 @@ def plot_gesture_tau_maps(profiles, title_prefix, output_path, triangle_only=Tru
             axes[idx].set_yticks(np.arange(C_plot + 1) - 0.5, minor=True)
             axes[idx].grid(which="minor", color="gray", linestyle='-', linewidth=0.5)
 
+            # Add numerical annotations on lower triangle
+            for i in range(C_plot):
+                for j in range(C_plot):
+                    if not tau_masked.mask[i, j]:  # Only annotate non-masked cells (lower triangle)
+                        value = tau[i, j]
+                        # Use white text for very dark colors, black for light colors
+                        text_color = 'white' if abs(value) > 0.6 * max_abs else 'black'
+                        axes[idx].text(j, i, f'{value:.2f}',
+                                     ha="center", va="center",
+                                     color=text_color, fontsize=7)
+
             axes[idx].set_title(f"{gesture.capitalize()}", fontsize=13, fontweight='bold', pad=12)
             axes[idx].set_xlabel("EMG Channel", fontsize=11)
             if idx == 0:
@@ -922,6 +1111,19 @@ def plot_subject_vs_population_tau_maps(subject_profiles, population_profiles,
                 axes[row_idx, col_idx].set_xticks(np.arange(C_plot + 1) - 0.5, minor=True)
                 axes[row_idx, col_idx].set_yticks(np.arange(C_plot + 1) - 0.5, minor=True)
                 axes[row_idx, col_idx].grid(which="minor", color="gray", linestyle='-', linewidth=0.5)
+
+                # Add numerical annotations on lower triangle
+                tau_to_annotate = tau_subject if col_idx == 0 else tau_population
+                tau_masked_to_check = tau_subject_masked if col_idx == 0 else tau_population_masked
+                for i in range(C_plot):
+                    for j in range(C_plot):
+                        if not tau_masked_to_check.mask[i, j]:  # Only annotate non-masked cells
+                            value = tau_to_annotate[i, j]
+                            # Use white text for very dark colors, black for light colors
+                            text_color = 'white' if abs(value) > 0.6 * max_abs else 'black'
+                            axes[row_idx, col_idx].text(j, i, f'{value:.2f}',
+                                                       ha="center", va="center",
+                                                       color=text_color, fontsize=6)
 
                 axes[row_idx, col_idx].set_xlabel("EMG Channel", fontsize=10)
                 axes[row_idx, col_idx].set_ylabel("EMG Channel", fontsize=10)
@@ -1052,6 +1254,7 @@ def compute_and_plot_tau_similarities(subject_profiles, population_profiles,
 def leave_one_out_analysis(all_subject_profiles, subject_to_hold_out):
     """
     Perform leave-one-out analysis: compute population mean excluding one subject.
+    Uses Gaussian copula + Fisher z aggregation.
 
     Parameters
     ----------
@@ -1088,6 +1291,48 @@ def leave_one_out_analysis(all_subject_profiles, subject_to_hold_out):
     return population_profiles_loo
 
 
+def leave_one_out_analysis_simple(all_subject_profiles, subject_to_hold_out, method="median"):
+    """
+    Perform leave-one-out analysis: compute population mean excluding one subject.
+    Uses simple τ-space aggregation (median by default).
+
+    Parameters
+    ----------
+    all_subject_profiles : dict
+        {subject_name: {gesture_name: {'tau': tau_matrix}}}
+    subject_to_hold_out : str
+        Name of subject to exclude from population mean
+    method : str
+        Aggregation method ("median", "mean", or "trimmed")
+
+    Returns
+    -------
+    population_profiles_loo : dict
+        Population profiles computed without the held-out subject
+    """
+    population_profiles_loo = {}
+
+    for gesture in ["relax", "open", "close"]:
+        all_tau_maps = []
+
+        for subject_name, profiles in all_subject_profiles.items():
+            if subject_name == subject_to_hold_out:
+                continue  # Skip the held-out subject
+
+            if gesture in profiles:
+                all_tau_maps.append(profiles[gesture]['tau'])
+
+        if len(all_tau_maps) > 0:
+            tau_pop = aggregate_subjects_to_population_simple(all_tau_maps, method=method)
+
+            population_profiles_loo[gesture] = {
+                'tau': tau_pop,
+                'n_subjects': len(all_tau_maps)
+            }
+
+    return population_profiles_loo
+
+
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
@@ -1096,16 +1341,21 @@ def main():
     """
     Main execution: process all ROAM subjects and compute population Kendall tau-b maps.
 
+    Computes TWO versions:
+    1. ORIGINAL: Gaussian copula + Fisher z aggregation
+    2. SIMPLE: Direct τ-space median aggregation
+
     Pipeline:
     1. Test on single subject to verify processing
-    2. Process all subjects
-    3. Save per-subject tau-b maps
-    4. Aggregate to population level using geometry-aware method
-    5. Generate visualizations
-    6. Perform leave-one-out analysis
+    2. Process all subjects (both methods)
+    3. Save per-subject tau-b maps (both methods)
+    4. Aggregate to population level (both methods)
+    5. Generate visualizations (both methods)
+    6. Perform leave-one-out analysis (both methods)
     """
     print("="*60)
     print("ROAM-EMG KENDALL TAU-B CO-ACTIVATION ANALYSIS")
+    print("TWO METHODS: (1) Fisher z, (2) Simple τ-space")
     print("="*60)
     print()
 
@@ -1171,23 +1421,51 @@ def main():
             print(f"\nError processing {subject_dir.name}: {e}")
             continue
 
-    print(f"Successfully processed {len(all_subject_profiles)} subjects")
+    print(f"Successfully processed {len(all_subject_profiles)} subjects (Fisher z method)")
     print()
 
-    # Save per-subject profiles
-    for subject_name, profiles in tqdm(all_subject_profiles.items(), desc="Saving profiles"):
+    # Save per-subject profiles (Fisher z method)
+    for subject_name, profiles in tqdm(all_subject_profiles.items(), desc="Saving profiles (Fisher z)"):
         save_dict = {}
         for gesture, data in profiles.items():
             save_dict[f"{gesture}_tau"] = data['tau']
             save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
 
-        npz_path = DATA_DIR / "per_subject" / f"{subject_name}_kendall.npz"
+        npz_path = DATA_DIR / "per_subject" / f"{subject_name}_kendall_fisherz.npz"
         np.savez(npz_path, **save_dict)
 
     print()
 
-    # Step 3: Compute population-level profiles
-    print("Step 3: Computing population-level Kendall tau-b maps")
+    # Step 2b: Process all subjects with SIMPLE τ-space method
+    print("Step 2b: Processing all subjects (Simple τ-space method)")
+    all_subject_profiles_simple = {}
+
+    for subject_dir in tqdm(subject_dirs, desc="Processing subjects (simple)"):
+        try:
+            profiles = compute_subject_kendall_profiles_simple(subject_dir, method="median")
+            if profiles:
+                all_subject_profiles_simple[subject_dir.name] = profiles
+        except Exception as e:
+            print(f"\nError processing {subject_dir.name}: {e}")
+            continue
+
+    print(f"Successfully processed {len(all_subject_profiles_simple)} subjects (Simple τ-space method)")
+    print()
+
+    # Save per-subject profiles (Simple method)
+    for subject_name, profiles in tqdm(all_subject_profiles_simple.items(), desc="Saving profiles (simple)"):
+        save_dict = {}
+        for gesture, data in profiles.items():
+            save_dict[f"{gesture}_tau"] = data['tau']
+            save_dict[f"{gesture}_n_repetitions"] = data['n_repetitions']
+
+        npz_path = DATA_DIR / "per_subject" / f"{subject_name}_kendall_simple.npz"
+        np.savez(npz_path, **save_dict)
+
+    print()
+
+    # Step 3: Compute population-level profiles (Fisher z method)
+    print("Step 3: Computing population-level Kendall tau-b maps (Fisher z method)")
     population_profiles = {}
 
     for gesture in ["relax", "open", "close"]:
@@ -1208,36 +1486,78 @@ def main():
             print(f"{gesture}: aggregated {len(all_tau_maps)} subjects")
             print(f"  Tau-b range: [{tau_pop.min():.3f}, {tau_pop.max():.3f}]")
 
-    # Save population profiles
+    # Save population profiles (Fisher z)
     pop_save_dict = {}
     for gesture, data in population_profiles.items():
         pop_save_dict[f"{gesture}_tau"] = data['tau']
         pop_save_dict[f"{gesture}_n_subjects"] = data['n_subjects']
 
-    pop_npz_path = DATA_DIR / "population_kendall.npz"
+    pop_npz_path = DATA_DIR / "population_kendall_fisherz.npz"
     np.savez(pop_npz_path, **pop_save_dict)
     print(f"Saved: {pop_npz_path}")
 
-    # Plot population results
+    # Plot population results (Fisher z)
     plot_gesture_tau_maps(
         population_profiles,
-        "Population-Level",
-        PLOTS_DIR / "population_kendall.png",
+        "Population-Level (Fisher z)",
+        PLOTS_DIR / "population_kendall_fisherz.png",
         triangle_only=TRIANGLE_ONLY
     )
 
     print()
 
-    # Step 4: Leave-One-Out Analysis
+    # Step 3b: Compute population-level profiles (Simple τ-space method)
+    print("Step 3b: Computing population-level Kendall tau-b maps (Simple τ-space method)")
+    population_profiles_simple = {}
+
+    for gesture in ["relax", "open", "close"]:
+        all_tau_maps = []
+
+        for subject_name, profiles in all_subject_profiles_simple.items():
+            if gesture in profiles:
+                all_tau_maps.append(profiles[gesture]['tau'])
+
+        if len(all_tau_maps) > 0:
+            tau_pop = aggregate_subjects_to_population_simple(all_tau_maps, method="median")
+
+            population_profiles_simple[gesture] = {
+                'tau': tau_pop,
+                'n_subjects': len(all_tau_maps)
+            }
+
+            print(f"{gesture}: aggregated {len(all_tau_maps)} subjects")
+            print(f"  Tau-b range: [{tau_pop.min():.3f}, {tau_pop.max():.3f}]")
+
+    # Save population profiles (Simple)
+    pop_save_dict_simple = {}
+    for gesture, data in population_profiles_simple.items():
+        pop_save_dict_simple[f"{gesture}_tau"] = data['tau']
+        pop_save_dict_simple[f"{gesture}_n_subjects"] = data['n_subjects']
+
+    pop_npz_path_simple = DATA_DIR / "population_kendall_simple.npz"
+    np.savez(pop_npz_path_simple, **pop_save_dict_simple)
+    print(f"Saved: {pop_npz_path_simple}")
+
+    # Plot population results (Simple)
+    plot_gesture_tau_maps(
+        population_profiles_simple,
+        "Population-Level (Simple τ-space)",
+        PLOTS_DIR / "population_kendall_simple.png",
+        triangle_only=TRIANGLE_ONLY
+    )
+
+    print()
+
+    # Step 4: Leave-One-Out Analysis (Fisher z method)
     print("="*60)
-    print("Step 4: Leave-One-Out Analysis")
+    print("Step 4: Leave-One-Out Analysis (Fisher z method)")
     print("="*60)
 
     # Select a subject for leave-one-out analysis (use first subject)
     loo_subject = list(all_subject_profiles.keys())[0]
     print(f"\nHeld-out subject: {loo_subject}")
 
-    # Compute population profiles excluding this subject (LOO)
+    # Compute population profiles excluding this subject (LOO) - Fisher z
     population_profiles_loo = leave_one_out_analysis(all_subject_profiles, loo_subject)
 
     print(f"\nPopulation Kendall tau-b maps computed without {loo_subject} (LOO):")
@@ -1263,48 +1583,108 @@ def main():
     )
 
     # Also save full population plot in leave_one_out folder for easy comparison
-    print(f"\nSaving full population plot to leave_one_out folder for comparison...")
+    print("\nSaving full population plot (Fisher z) to leave_one_out folder for comparison...")
     plot_gesture_tau_maps(
         population_profiles,
-        "Population-Level (All Subjects)",
-        PLOTS_DIR / "leave_one_out" / "population_all_subjects_kendall.png",
+        "Population-Level Fisher z (All Subjects)",
+        PLOTS_DIR / "leave_one_out" / "population_all_subjects_kendall_fisherz.png",
         triangle_only=TRIANGLE_ONLY
     )
 
-    # Step 5: Subject vs Population Comparison
+    # Step 4b: Leave-One-Out Analysis (Simple τ-space method)
     print("\n" + "="*60)
-    print("Step 5: Subject vs Population Comparison")
+    print("Step 4b: Leave-One-Out Analysis (Simple τ-space method)")
     print("="*60)
 
-    # Plot held-out subject's profiles
-    print(f"\nGenerating visualizations for {loo_subject}...")
+    # Compute population profiles excluding this subject (LOO) - Simple
+    population_profiles_loo_simple = leave_one_out_analysis_simple(
+        all_subject_profiles_simple, loo_subject, method="median"
+    )
+
+    print(f"\nPopulation Kendall tau-b maps computed without {loo_subject} (LOO, Simple):")
+    for gesture, data in population_profiles_loo_simple.items():
+        print(f"  {gesture}: aggregated {data['n_subjects']} subjects")
+
+    # Save leave-one-out population profiles (Simple)
+    loo_save_dict_simple = {}
+    for gesture, data in population_profiles_loo_simple.items():
+        loo_save_dict_simple[f"{gesture}_tau"] = data['tau']
+        loo_save_dict_simple[f"{gesture}_n_subjects"] = data['n_subjects']
+
+    loo_npz_path_simple = DATA_DIR / "leave_one_out" / f"population_without_{loo_subject}_simple.npz"
+    np.savez(loo_npz_path_simple, **loo_save_dict_simple)
+    print(f"\nSaved: {loo_npz_path_simple}")
+
+    # Plot leave-one-out population profiles (Simple)
     plot_gesture_tau_maps(
-        all_subject_profiles[loo_subject],
-        f"Subject {loo_subject}",
-        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_kendall.png",
+        population_profiles_loo_simple,
+        f"Population (LOO without {loo_subject}, Simple τ-space)",
+        PLOTS_DIR / "leave_one_out" / f"population_without_{loo_subject}_kendall_simple.png",
         triangle_only=TRIANGLE_ONLY
     )
 
-    # Side-by-side comparison plot
-    print(f"\nGenerating subject vs population comparison...")
+    # Also save full population plot (Simple) in leave_one_out folder for easy comparison
+    print("\nSaving full population plot (Simple) to leave_one_out folder for comparison...")
+    plot_gesture_tau_maps(
+        population_profiles_simple,
+        "Population-Level Simple τ-space (All Subjects)",
+        PLOTS_DIR / "leave_one_out" / "population_all_subjects_kendall_simple.png",
+        triangle_only=TRIANGLE_ONLY
+    )
+
+    # Step 5: Subject vs Population Comparison (Both Methods)
+    print("\n" + "="*60)
+    print("Step 5: Subject vs Population Comparison (Both Methods)")
+    print("="*60)
+
+    # Fisher z method
+    print(f"\nGenerating visualizations for {loo_subject} (Fisher z)...")
+    plot_gesture_tau_maps(
+        all_subject_profiles[loo_subject],
+        f"Subject {loo_subject} (Fisher z)",
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_kendall_fisherz.png",
+        triangle_only=TRIANGLE_ONLY
+    )
+
+    # Side-by-side comparison plot (Fisher z)
+    print(f"Generating subject vs population comparison (Fisher z)...")
     plot_subject_vs_population_tau_maps(
         all_subject_profiles[loo_subject],
         population_profiles_loo,
-        loo_subject,
-        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_vs_loo_kendall.png",
+        f"{loo_subject} (Fisher z)",
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_vs_loo_kendall_fisherz.png",
         triangle_only=TRIANGLE_ONLY
     )
 
-    # Step 6: Similarity Analysis
+    # Simple τ-space method
+    print(f"\nGenerating visualizations for {loo_subject} (Simple)...")
+    plot_gesture_tau_maps(
+        all_subject_profiles_simple[loo_subject],
+        f"Subject {loo_subject} (Simple τ-space)",
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_kendall_simple.png",
+        triangle_only=TRIANGLE_ONLY
+    )
+
+    # Side-by-side comparison plot (Simple)
+    print(f"Generating subject vs population comparison (Simple)...")
+    plot_subject_vs_population_tau_maps(
+        all_subject_profiles_simple[loo_subject],
+        population_profiles_loo_simple,
+        f"{loo_subject} (Simple τ-space)",
+        PLOTS_DIR / "leave_one_out" / f"{loo_subject}_vs_loo_kendall_simple.png",
+        triangle_only=TRIANGLE_ONLY
+    )
+
+    # Step 6: Similarity Analysis (Both Methods)
     print("\n" + "="*60)
-    print("Step 6: Kendall Tau-b Map Similarity Analysis")
+    print("Step 6: Kendall Tau-b Map Similarity Analysis (Both Methods)")
     print("="*60)
 
-    # Compare held-out subject to leave-one-out population
-    print(f"\nComparing {loo_subject} to LOO population...")
-
-    # Compute similarities (without redundant bar plots - metrics already shown in comparison plots)
     gesture_list = ["relax", "open", "close"]
+
+    # Fisher z method
+    print(f"\nComparing {loo_subject} to LOO population (Fisher z)...")
+
     similarities_loo = {}
     for gesture in gesture_list:
         if gesture in all_subject_profiles[loo_subject] and gesture in population_profiles_loo:
@@ -1314,15 +1694,16 @@ def main():
             )
             similarities_loo[gesture] = sim
 
-    print(f"\nSimilarity Metrics ({loo_subject} vs LOO Population):")
+    print(f"\nSimilarity Metrics Fisher z ({loo_subject} vs LOO Population):")
     for gesture, metrics in similarities_loo.items():
         print(f"  {gesture}:")
         print(f"    Pearson (z-space): {metrics['pearson_z']:.4f}")
         print(f"    Frobenius dist (z): {metrics['fro_z']:.4f}")
         print(f"    Cosine similarity: {metrics['cosine_z']:.4f}")
 
-    # Save similarity metrics to JSON
-    similarity_results = {
+    # Save similarity metrics to JSON (Fisher z)
+    similarity_results_fisherz = {
+        "method": "Fisher z",
         "subject": loo_subject,
         "vs_loo_population": similarities_loo,
         "interpretation": {
@@ -1332,10 +1713,46 @@ def main():
         }
     }
 
-    json_path = DATA_DIR / "leave_one_out" / f"{loo_subject}_kendall_similarities.json"
-    with open(json_path, 'w') as f:
-        json.dump(similarity_results, f, indent=2, default=float)
-    print(f"\nSaved similarity metrics: {json_path}")
+    json_path_fisherz = DATA_DIR / "leave_one_out" / f"{loo_subject}_kendall_similarities_fisherz.json"
+    with open(json_path_fisherz, 'w') as f:
+        json.dump(similarity_results_fisherz, f, indent=2, default=float)
+    print(f"\nSaved similarity metrics (Fisher z): {json_path_fisherz}")
+
+    # Simple τ-space method
+    print(f"\nComparing {loo_subject} to LOO population (Simple τ-space)...")
+
+    similarities_loo_simple = {}
+    for gesture in gesture_list:
+        if gesture in all_subject_profiles_simple[loo_subject] and gesture in population_profiles_loo_simple:
+            sim = tau_map_similarity(
+                all_subject_profiles_simple[loo_subject][gesture]['tau'],
+                population_profiles_loo_simple[gesture]['tau']
+            )
+            similarities_loo_simple[gesture] = sim
+
+    print(f"\nSimilarity Metrics Simple ({loo_subject} vs LOO Population):")
+    for gesture, metrics in similarities_loo_simple.items():
+        print(f"  {gesture}:")
+        print(f"    Pearson (z-space): {metrics['pearson_z']:.4f}")
+        print(f"    Frobenius dist (z): {metrics['fro_z']:.4f}")
+        print(f"    Cosine similarity: {metrics['cosine_z']:.4f}")
+
+    # Save similarity metrics to JSON (Simple)
+    similarity_results_simple = {
+        "method": "Simple τ-space median",
+        "subject": loo_subject,
+        "vs_loo_population": similarities_loo_simple,
+        "interpretation": {
+            "pearson_z": "Correlation in Fisher z-space. Range [-1,1]. Higher = more similar pattern.",
+            "fro_z": "Frobenius distance in z-space. Lower = more similar. 0 = identical.",
+            "cosine_z": "Cosine similarity in z-space. Range [0,1]. 1 = identical direction."
+        }
+    }
+
+    json_path_simple = DATA_DIR / "leave_one_out" / f"{loo_subject}_kendall_similarities_simple.json"
+    with open(json_path_simple, 'w') as f:
+        json.dump(similarity_results_simple, f, indent=2, default=float)
+    print(f"\nSaved similarity metrics (Simple): {json_path_simple}")
 
     # Step 7: Stroke Patient Analysis (P4 and P15 vs Healthy Population)
     print("\n" + "="*60)
@@ -1438,6 +1855,150 @@ def main():
     print(f"\nAll outputs saved to: {OUTPUT_DIR.absolute()}")
     print(f"  Data files (.npz, .json): {DATA_DIR.absolute()}")
     print(f"  Plots (.png): {PLOTS_DIR.absolute()}")
+
+
+def plot_preprocessing_comparison(subject_dir, output_path, segment_duration=1.0):
+    """
+    Visualize preprocessing steps for a segment of each gesture class.
+
+    Shows the signal at different stages:
+    1. Raw EMG
+    2. After bandpass filter + rectification
+    3. After lowpass filter (envelope)
+
+    Parameters
+    ----------
+    subject_dir : Path
+        Directory containing subject's CSV files
+    output_path : Path
+        Path for saving the plot
+    segment_duration : float
+        Duration of segment to plot (in seconds)
+    """
+    print(f"\nCreating preprocessing visualization...")
+
+    # Find a file that likely has all three gestures
+    test_files = list(subject_dir.glob("*_static_resting.csv"))
+    if len(test_files) == 0:
+        test_files = list(subject_dir.glob("*.csv"))
+
+    if len(test_files) == 0:
+        print("No CSV files found!")
+        return
+
+    file_path = test_files[0]
+    print(f"Using file: {file_path.name}")
+
+    # Load data
+    df = pd.read_csv(file_path)
+    labels = df['gt'].values
+    emg_cols = [f'emg{i}' for i in range(8)]
+    emg = df[emg_cols].values  # (T, 8)
+
+    # Extract one segment per gesture
+    segments_raw = {}
+    n_samples = int(segment_duration * FS)
+
+    for label, gesture_name in GESTURES.items():
+        indices = np.where(labels == label)[0]
+        if len(indices) >= n_samples:
+            # Take middle segment to avoid edge effects
+            start_idx = indices[len(indices)//2]
+            end_idx = start_idx + n_samples
+            if end_idx <= indices[-1]:
+                segment = emg[start_idx:end_idx, :].T  # (8, T)
+                segments_raw[gesture_name] = segment
+
+    if len(segments_raw) == 0:
+        print("Could not extract segments for gestures!")
+        return
+
+    print(f"Extracted segments for: {list(segments_raw.keys())}")
+
+    # Process each segment through preprocessing pipeline
+    segments_processed = {}
+    for gesture_name, X_raw in segments_raw.items():
+        # Step 1: Bandpass filter
+        sos_bp = signal.butter(4, [10.0, 95.0], btype="bandpass", fs=FS, output="sos")
+        X_bandpass = signal.sosfiltfilt(sos_bp, X_raw, axis=1)
+
+        # Step 2: Rectify
+        X_rectified = np.abs(X_bandpass)
+
+        # Step 3: Lowpass filter (envelope)
+        sos_lp = signal.butter(2, 6.0, btype="lowpass", fs=FS, output="sos")
+        X_envelope = signal.sosfiltfilt(sos_lp, X_rectified, axis=1)
+
+        segments_processed[gesture_name] = {
+            'raw': X_raw,
+            'rectified': X_rectified,
+            'envelope': X_envelope
+        }
+
+    # Compute global y-scale (same across all gestures and channels)
+    all_values = []
+    for gesture_name, data in segments_processed.items():
+        all_values.extend(data['raw'].flatten())
+        all_values.extend(data['rectified'].flatten())
+        all_values.extend(data['envelope'].flatten())
+
+    y_min = np.min(all_values)
+    y_max = np.max(all_values)
+    y_margin = (y_max - y_min) * 0.1
+    y_lim = [y_min - y_margin, y_max + y_margin]
+
+    print(f"Global y-scale: [{y_lim[0]:.2f}, {y_lim[1]:.2f}]")
+
+    # Create figure: 3 rows (gestures) x 3 columns (processing stages)
+    gesture_list = ["relax", "open", "close"]
+    fig, axes = plt.subplots(3, 3, figsize=(18, 12))
+
+    # Time axis
+    t = np.arange(n_samples) / FS
+
+    # Pick one representative channel to plot (e.g., channel 0)
+    channel_idx = 0
+
+    for row_idx, gesture in enumerate(gesture_list):
+        if gesture not in segments_processed:
+            continue
+
+        data = segments_processed[gesture]
+
+        # Column 0: Raw signal
+        axes[row_idx, 0].plot(t, data['raw'][channel_idx, :], 'k-', linewidth=0.5, alpha=0.7)
+        axes[row_idx, 0].set_ylim(y_lim)
+        axes[row_idx, 0].grid(True, alpha=0.3)
+        if row_idx == 0:
+            axes[row_idx, 0].set_title("Raw EMG", fontsize=13, fontweight='bold')
+        if row_idx == 2:
+            axes[row_idx, 0].set_xlabel("Time (s)", fontsize=11)
+        axes[row_idx, 0].set_ylabel(f"{gesture.capitalize()}\nAmplitude", fontsize=11)
+
+        # Column 1: After bandpass + rectification
+        axes[row_idx, 1].plot(t, data['rectified'][channel_idx, :], 'b-', linewidth=0.5, alpha=0.7)
+        axes[row_idx, 1].set_ylim(y_lim)
+        axes[row_idx, 1].grid(True, alpha=0.3)
+        if row_idx == 0:
+            axes[row_idx, 1].set_title("Bandpass (10-95 Hz) + Rectification", fontsize=13, fontweight='bold')
+        if row_idx == 2:
+            axes[row_idx, 1].set_xlabel("Time (s)", fontsize=11)
+
+        # Column 2: After lowpass (envelope)
+        axes[row_idx, 2].plot(t, data['envelope'][channel_idx, :], 'r-', linewidth=1.0, alpha=0.8)
+        axes[row_idx, 2].set_ylim(y_lim)
+        axes[row_idx, 2].grid(True, alpha=0.3)
+        if row_idx == 0:
+            axes[row_idx, 2].set_title("Lowpass (6 Hz) - Envelope", fontsize=13, fontweight='bold')
+        if row_idx == 2:
+            axes[row_idx, 2].set_xlabel("Time (s)", fontsize=11)
+
+    plt.suptitle(f"EMG Preprocessing Pipeline (Channel {channel_idx})\n{file_path.parent.name} - {file_path.name}",
+                 fontsize=14, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {output_path}")
 
 
 if __name__ == "__main__":
