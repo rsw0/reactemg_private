@@ -42,6 +42,9 @@ STROKE_PATIENT_DIRS = [
     Path("/home/rsw1/Workspace/reactemg_private/reactemg/private/2025_09_04_p15")
 ]
 
+# Left-handed patients (require channel remapping to right-hand space)
+LEFT_HANDED_PATIENTS = ["2025_09_04_p15"]
+
 # Save outputs in the same directory as this script
 SCRIPT_DIR = Path(__file__).parent
 OUTPUT_DIR = SCRIPT_DIR / "coact_rs_output"
@@ -90,6 +93,30 @@ STROKE_FILE_PATTERNS = [
 # ============================================================
 # EMG PREPROCESSING
 # ============================================================
+
+def remap_left_to_right_hand(X):
+    """
+    Remap EMG channels from left-hand to right-hand space.
+
+    When the Myo armband is worn on the left hand with the LED facing outward
+    and aligned with the middle finger MCP, the channels need to be remapped
+    to match the right-hand reference frame used in population statistics.
+
+    Parameters
+    ----------
+    X : ndarray, shape (C, T)
+        Raw EMG data (channels x time), where C=8 for Myo armband
+
+    Returns
+    -------
+    X_remapped : ndarray, shape (C, T)
+        EMG data remapped to right-hand space
+    """
+    # Channel remapping: [6, 5, 4, 3, 2, 1, 0, 7]
+    # This mirrors channels 0-6 while keeping channel 7 in place
+    remap_order = [6, 5, 4, 3, 2, 1, 0, 7]
+    return X[remap_order, :]
+
 
 def preprocess_emg_envelope(
     X,
@@ -455,7 +482,7 @@ def load_gesture_segments_csv(file_path, target_label, min_length=200):
 # PROFILE COMPUTATION: Subject & Population Level
 # ============================================================
 
-def compute_subject_profiles(subject_dir, file_patterns=None):
+def compute_subject_profiles(subject_dir, file_patterns=None, is_left_handed=False):
     """
     Compute relative strength profiles for one subject across all repetitions.
 
@@ -473,6 +500,8 @@ def compute_subject_profiles(subject_dir, file_patterns=None):
         Directory containing subject's CSV files
     file_patterns : list of str, optional
         File patterns to match. If None, uses FILE_PATTERNS (default for healthy subjects)
+    is_left_handed : bool, optional
+        If True, remap channels from left-hand to right-hand space before processing
 
     Returns
     -------
@@ -504,6 +533,10 @@ def compute_subject_profiles(subject_dir, file_patterns=None):
                         # segment shape: (C, T)
                         if segment.shape[1] < 200:  # Skip very short segments
                             continue
+
+                        # Remap channels if left-handed
+                        if is_left_handed:
+                            segment = remap_left_to_right_hand(segment)
 
                         # Compute relative strength for this repetition
                         _, _, _, a = compute_profile_from_window(segment, FS)
@@ -1108,9 +1141,18 @@ def main():
         print(f"\nProcessing stroke patient: {stroke_id}")
         print("-" * 60)
 
+        # Check if this patient is left-handed
+        is_left_handed = stroke_id in LEFT_HANDED_PATIENTS
+        if is_left_handed:
+            print(f"  Note: {stroke_id} is left-handed, applying channel remapping to right-hand space")
+
         # Compute profiles for stroke patient using specific file patterns
         try:
-            stroke_profiles = compute_subject_profiles(stroke_dir, file_patterns=STROKE_FILE_PATTERNS)
+            stroke_profiles = compute_subject_profiles(
+                stroke_dir,
+                file_patterns=STROKE_FILE_PATTERNS,
+                is_left_handed=is_left_handed
+            )
 
             if not stroke_profiles:
                 print(f"  Warning: No profiles computed for {stroke_id}")
